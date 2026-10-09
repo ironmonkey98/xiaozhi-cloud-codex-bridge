@@ -9,6 +9,7 @@
   "dependencies": {
     "@modelcontextprotocol/server": "^2.3.1",
     "@openai/codex-sdk": "^0.162.0",
+    "mqtt": "^5.16.0",
     "zod": "^4.6.5"
   },
   "devDependencies": {
@@ -30,6 +31,9 @@
     "pipe": "bash scripts/start-pipe.sh",
     "test:e2e": "RUN_CODEX_E2E=1 node --test --test-concurrency=1 tests/e2e/codex-real.test.ts",
     "mcp:call": "node scripts/mcp-call.ts",
-    "test:pipe": "npm run build && node --test tests/e2e/pipe-compat.test.ts"
+    "test:pipe": "npm run build && node --test tests/e2e/pipe-compat.test.ts",
+    "notify:relay": "node scripts/notify-relay.ts",
+    "notify:probe": "node scripts/probe-notify.ts",
+    "notify:device": "node scripts/probe-query-device.ts"
   }
 }

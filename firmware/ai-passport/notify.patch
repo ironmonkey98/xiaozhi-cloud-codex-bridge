@@ -1,0 +1,522 @@
+--- a/main/application.cc
++++ b/main/application.cc
+@@ -182,12 +182,17 @@
+         MAIN_EVENT_VAD_CHANGE | MAIN_EVENT_CLOCK_TICK | MAIN_EVENT_ERROR |
+         MAIN_EVENT_NETWORK_CONNECTED | MAIN_EVENT_NETWORK_DISCONNECTED | MAIN_EVENT_TOGGLE_CHAT |
+         MAIN_EVENT_START_LISTENING | MAIN_EVENT_STOP_LISTENING | MAIN_EVENT_ACTIVATION_DONE |
+-        MAIN_EVENT_STATE_CHANGED | MAIN_EVENT_PLAYBACK_DRAINED;
++        MAIN_EVENT_STATE_CHANGED | MAIN_EVENT_PLAYBACK_DRAINED | MAIN_EVENT_QUERY_TICK;
+ 
+     while (true) {
+         auto bits = xEventGroupWaitBits(event_group_, ALL_EVENTS, pdTRUE, pdFALSE, portMAX_DELAY);
+ 
++        if (bits & MAIN_EVENT_QUERY_TICK)
++            TickNotificationQuery();
++
+         if (bits & MAIN_EVENT_ERROR) {
++            if (query_active_)
++                FinishNotificationQuery(false);
+             if (GetDeviceState() == kDeviceStateNotifying) {
+                 StopNotification();
+             }
+@@ -239,6 +244,8 @@
+ 
+         if (bits & MAIN_EVENT_SEND_AUDIO) {
+             while (auto packet = audio_service_.PopPacketFromSendQueue()) {
++                if (query_active_)
++                    continue;  // Never mix microphone frames into a fixed query.
+                 if (protocol_ && !protocol_->SendAudio(std::move(packet))) {
+                     // Drop the remaining packets. Leaving them in the queue would
+                     // stall the Opus codec task (it waits for queue space), which in
+@@ -553,7 +560,8 @@
+ 
+     protocol_->OnIncomingAudio([this](std::unique_ptr<AudioStreamPacket> packet) {
+         if (GetDeviceState() == kDeviceStateSpeaking) {
+-            audio_service_.PushPacketToDecodeQueue(std::move(packet));
++            if (audio_service_.PushPacketToDecodeQueue(std::move(packet)) && query_active_)
++                query_audio_received_ = true;
+         }
+     });
+ 
+@@ -570,6 +578,9 @@
+     protocol_->OnAudioChannelClosed([this, &board]() {
+         board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
+         Schedule([this]() {
++            if (query_active_)
++                FinishNotificationQuery(false);
++            normal_turn_in_flight_ = false;
+             auto display = Board::GetInstance().GetDisplay();
+             display->SetChatMessage("system", "");
+             SetDeviceState(kDeviceStateIdle);
+@@ -624,10 +635,20 @@
+             if (strcmp(state->valuestring, "start") == 0) {
+                 Schedule([this]() {
+                     aborted_ = false;
++                    if (query_active_) {
++                        query_tts_started_ = true;
++                        query_tts_stopped_ = false;
++                    }
+                     SetDeviceState(kDeviceStateSpeaking);
+                 });
+             } else if (strcmp(state->valuestring, "stop") == 0) {
+                 Schedule([this]() {
++                    if (query_active_) {
++                        query_tts_stopped_ = true;
++                        TickNotificationQuery();
++                        return;
++                    }
++                    normal_turn_in_flight_ = false;
+                     if (GetDeviceState() == kDeviceStateSpeaking) {
+                         if (listening_mode_ == kListeningModeManualStop) {
+                             SetDeviceState(kDeviceStateIdle);
+@@ -661,8 +682,10 @@
+                     glyphs.clear();
+                 }
+                 ESP_LOGI(TAG, ">> %s", text->valuestring);
+-                Schedule([display, message = std::string(text->valuestring),
++                Schedule([this, display, message = std::string(text->valuestring),
+                           glyphs = std::move(glyphs), bpp]() {
++                    if (!query_active_ && !message.empty())
++                        normal_turn_in_flight_ = true;
+                     display->AddTextGlyphs(glyphs, bpp);
+                     display->SetChatMessage("user", message.c_str());
+                 });
+@@ -778,6 +801,8 @@
+ void Application::StopListening() { xEventGroupSetBits(event_group_, MAIN_EVENT_STOP_LISTENING); }
+ 
+ void Application::HandleToggleChatEvent() {
++    if (query_active_)
++        FinishNotificationQuery(false);
+     auto state = GetDeviceState();
+ 
+     if (state == kDeviceStateNotifying) {
+@@ -842,6 +867,8 @@
+ }
+ 
+ void Application::HandleStartListeningEvent() {
++    if (query_active_)
++        FinishNotificationQuery(false);
+     auto state = GetDeviceState();
+ 
+     if (state == kDeviceStateNotifying) {
+@@ -878,6 +905,8 @@
+ }
+ 
+ void Application::HandleStopListeningEvent() {
++    if (query_active_)
++        FinishNotificationQuery(false);
+     auto state = GetDeviceState();
+ 
+     if (state == kDeviceStateNotifying) {
+@@ -895,6 +924,8 @@
+ }
+ 
+ void Application::HandleWakeWordDetectedEvent() {
++    if (query_active_)
++        FinishNotificationQuery(false);
+     if (!protocol_) {
+         return;
+     }
+@@ -931,9 +962,143 @@
+     }
+ }
+ 
+-void Application::BeginWakeWordInvoke(const std::string& wake_word) {
++bool Application::RequestNotificationQuery(const uint8_t* packets, size_t size,
++                                           std::function<void(bool)> done) {
++    if (protocol_ && !query_active_ && GetDeviceState() == kDeviceStateListening &&
++        !pending_listening_start_ &&
++        audio_service_.CanYieldQuietListening(normal_turn_in_flight_,
++                                              listening_mode_ == kListeningModeManualStop)) {
++        // End an inactive waiting-for-input session, then start the query on the next tick.
++        // Let its close callback drain first, avoiding a stale close aborting the new query.
++        ESP_LOGI(TAG, "Notification pending: quiet listening yielded after 15 seconds");
++        audio_service_.EnableVoiceProcessing(false);
++        protocol_->CloseAudioChannel();
++        SetDeviceState(kDeviceStateIdle);
++        return false;
++    }
++    if (!protocol_ || query_active_ || GetDeviceState() != kDeviceStateIdle ||
++        !audio_service_.IsPlaybackIdle() || !packets || size == 0 || size > 65536)
++        return false;
++    size_t offset = 0, count = 0;
++    while (offset + 2 <= size) {
++        size_t length = packets[offset] | (packets[offset + 1] << 8);
++        offset += 2;
++        if (length == 0 || length > 1275 || offset + length > size)
++            return false;
++        offset += length;
++        if (++count > 334)
++            return false;
++    }
++    if (offset != size)
++        return false;
++    if (!query_timer_) {
++        esp_timer_create_args_t timer = {};
++        timer.name = "query-upload";
++        timer.arg = this;
++        timer.callback = [](void* arg) {
++            auto self = static_cast<Application*>(arg);
++            xEventGroupSetBits(self->event_group_, MAIN_EVENT_QUERY_TICK);
++        };
++        if (esp_timer_create(&timer, &query_timer_) != ESP_OK)
++            return false;
++    }
++    query_active_ = true;
++    query_audio_received_ = false;
++    query_packets_ = packets;
++    query_size_ = size;
++    query_offset_ = 0;
++    query_input_sent_ = query_tts_started_ = query_tts_stopped_ = false;
++    query_deadline_ = esp_timer_get_time() + 180000000;
++    query_done_ = std::move(done);
++    aborted_ = false;
++    audio_service_.EnableVoiceProcessing(false);
++    audio_service_.EnableWakeWordDetection(false);
++    while (audio_service_.PopPacketFromSendQueue()) {
++    }
++    SetDeviceState(kDeviceStateConnecting);
++    Schedule([this]() { ContinueNotificationQuery(); });
++    return true;
++}
++
++void Application::ContinueNotificationQuery() {
++    if (!query_active_)
++        return;
++    if (GetDeviceState() != kDeviceStateConnecting) {
++        FinishNotificationQuery(false);
++        return;
++    }
++    Board::GetInstance().SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
++    if (!protocol_->IsAudioChannelOpened() && !protocol_->OpenAudioChannel()) {
++        FinishNotificationQuery(false);
++        return;
++    }
++    SetListeningMode(kListeningModeManualStop);
++}
++
++void Application::TickNotificationQuery() {
++    if (!query_active_)
++        return;
++    if (aborted_ || esp_timer_get_time() > query_deadline_ || !protocol_->IsAudioChannelOpened()) {
++        FinishNotificationQuery(false);
++        return;
++    }
++    if (!query_input_sent_) {
++        if (query_offset_ == query_size_) {
++            protocol_->SendStopListening();
++            query_input_sent_ = true;
++            ESP_LOGI(TAG, "Notification query upload finished; waiting for cloud");
++        } else {
++            size_t length =
++                query_packets_[query_offset_] | (query_packets_[query_offset_ + 1] << 8);
++            query_offset_ += 2;
++            auto packet = std::make_unique<AudioStreamPacket>();
++            packet->sample_rate = 16000;
++            packet->frame_duration = 60;
++            packet->payload.assign(query_packets_ + query_offset_,
++                                   query_packets_ + query_offset_ + length);
++            query_offset_ += length;
++            if (!protocol_->SendAudio(std::move(packet)))
++                FinishNotificationQuery(false);
++        }
++        return;
++    }
++    if (query_tts_started_ && query_tts_stopped_ && query_audio_received_ &&
++        audio_service_.IsPlaybackIdle())
++        FinishNotificationQuery(true);
++}
++
++void Application::FinishNotificationQuery(bool success) {
++    if (!query_active_.exchange(false))
++        return;
++    if (query_timer_)
++        esp_timer_stop(query_timer_);
++    auto done = std::move(query_done_);
++    ESP_LOGI(TAG, "Notification query playback finished: %s",
++             success ? "drained" : "failed/interrupted");
++    if (protocol_->IsAudioChannelOpened())
++        protocol_->CloseAudioChannel(false);
++    SetDeviceState(kDeviceStateIdle);
++    if (done)
++        done(success);
++}
++
++bool Application::RequestNotificationWake(const std::string& task_id) {
++    if (!protocol_ || GetDeviceState() != kDeviceStateIdle || task_id.size() < 3 ||
++        task_id.size() > 14 || task_id.substr(0, 2) != "T-" ||
++        task_id.find_first_not_of("0123456789", 2) != std::string::npos) {
++        return false;
++    }
++    // listen.detect carries a wake word only, never a task query.
++    ESP_LOGI(TAG, "Notification wake requested for %s; cloud query is not confirmed",
++             task_id.c_str());
++    BeginWakeWordInvoke("你好小智", true);
++    return GetDeviceState() == kDeviceStateConnecting || GetDeviceState() == kDeviceStateListening;
++}
++
++void Application::BeginWakeWordInvoke(const std::string& wake_word, bool notification_wake) {
+     // Must run in the main task with the device in idle state
+-    audio_service_.EncodeWakeWord();
++    if (!notification_wake)
++        audio_service_.EncodeWakeWord();
+ 
+     // Always pass through the connecting state, even if the audio channel is
+     // already opened. ContinueWakeWordInvoke() rejects any other state, so
+@@ -948,14 +1113,16 @@
+     if (!protocol_->IsAudioChannelOpened()) {
+         // Schedule to let the state change be processed first (UI update),
+         // then continue with OpenAudioChannel which may block for ~1 second
+-        Schedule([this, wake_word]() { ContinueWakeWordInvoke(wake_word); });
++        Schedule([this, wake_word, notification_wake]() {
++            ContinueWakeWordInvoke(wake_word, notification_wake);
++        });
+         return;
+     }
+     // Channel already opened, continue directly
+-    ContinueWakeWordInvoke(wake_word);
+-}
+-
+-void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
++    ContinueWakeWordInvoke(wake_word, notification_wake);
++}
++
++void Application::ContinueWakeWordInvoke(const std::string& wake_word, bool notification_wake) {
+     // Check state again in case it was changed during scheduling
+     if (GetDeviceState() != kDeviceStateConnecting) {
+         return;
+@@ -975,6 +1142,13 @@
+         }
+     }
+ 
++    if (notification_wake) {
++        ESP_LOGI(TAG, "Notification wake word sent; cloud query is not confirmed");
++        protocol_->SendWakeWordDetected(wake_word);
++        play_popup_on_listening_ = true;
++        SetListeningMode(GetDefaultListeningMode());
++        return;
++    }
+     ESP_LOGI(TAG, "Wake word detected: %s", wake_word.c_str());
+ #if CONFIG_SEND_WAKE_WORD_DATA
+     // Encode and send the wake word data to the server
+@@ -1075,6 +1249,17 @@
+         return;
+     }
+ 
++    if (query_active_) {
++        audio_service_.EnableVoiceProcessing(false);
++        audio_service_.EnableWakeWordDetection(false);
++        while (audio_service_.PopPacketFromSendQueue()) {
++        }
++        protocol_->SendStartListening(kListeningModeManualStop);
++        esp_timer_start_periodic(query_timer_, 60000);
++        ESP_LOGI(TAG, "Notification query upload started; microphone disabled");
++        return;
++    }
++
+     // Send the start listening command
+     protocol_->SendStartListening(listening_mode_);
+     audio_service_.EnableVoiceProcessing(true);
+@@ -1173,6 +1358,9 @@
+ }
+ 
+ void Application::AbortSpeaking(AbortReason reason) {
++    normal_turn_in_flight_ = false;
++    if (query_active_)
++        FinishNotificationQuery(false);
+     ESP_LOGI(TAG, "Abort speaking");
+     aborted_ = true;
+     if (protocol_) {
+--- a/main/application.h
++++ b/main/application.h
+@@ -6,12 +6,13 @@
+ #include <freertos/task.h>
+ #include <esp_timer.h>
+ 
++#include <atomic>
++#include <cstdint>
++#include <deque>
++#include <functional>
++#include <memory>
++#include <mutex>
+ #include <string>
+-#include <mutex>
+-#include <deque>
+-#include <memory>
+-#include <functional>
+-#include <cstdint>
+ #include <vector>
+ 
+ #include "protocol.h"
+@@ -36,7 +37,7 @@
+ #define MAIN_EVENT_STOP_LISTENING       (1 << 11)
+ #define MAIN_EVENT_STATE_CHANGED        (1 << 12)
+ #define MAIN_EVENT_PLAYBACK_DRAINED     (1 << 13)
+-
++#define MAIN_EVENT_QUERY_TICK (1 << 14)
+ 
+ enum AecMode {
+     kAecOff,
+@@ -110,6 +111,10 @@
+ 
+     void Reboot();
+     void WakeWordInvoke(const std::string& wake_word);
++    // Main-task only: send a legal wake word; this does not request a task query.
++    bool RequestNotificationWake(const std::string& task_id);
++    bool RequestNotificationQuery(const uint8_t* packets, size_t size,
++                                  std::function<void(bool)> done);
+     bool UpgradeFirmware(const std::string& url, const std::string& version = "");
+     bool CanEnterSleepMode();
+     void SendMcpMessage(const std::string& payload);
+@@ -165,8 +170,20 @@
+     void HandleActivationDoneEvent();
+     void HandleWakeWordDetectedEvent();
+     void ContinueOpenAudioChannel(ListeningMode mode);
+-    void BeginWakeWordInvoke(const std::string& wake_word);
+-    void ContinueWakeWordInvoke(const std::string& wake_word);
++    std::atomic<bool> query_active_{false};
++    std::atomic<bool> query_audio_received_{false};
++    const uint8_t* query_packets_ = nullptr;
++    size_t query_size_ = 0, query_offset_ = 0;
++    bool normal_turn_in_flight_ = false;
++    bool query_input_sent_ = false, query_tts_started_ = false, query_tts_stopped_ = false;
++    int64_t query_deadline_ = 0;
++    esp_timer_handle_t query_timer_ = nullptr;
++    std::function<void(bool)> query_done_;
++    void ContinueNotificationQuery();
++    void TickNotificationQuery();
++    void FinishNotificationQuery(bool success);
++    void BeginWakeWordInvoke(const std::string& wake_word, bool notification_wake = false);
++    void ContinueWakeWordInvoke(const std::string& wake_word, bool notification_wake = false);
+     void StartListeningAudio();
+     void ConfigureWakeWordForListening();
+     void StartNotification(std::string audio_url, std::vector<NotifySubtitle> subtitles);
+--- a/main/audio/audio_service.cc
++++ b/main/audio/audio_service.cc
+@@ -1,6 +1,7 @@
+ #include "audio_service.h"
+ #include <esp_log.h>
+ #include <cstring>
++#include "input_quiet.h"
+ 
+ #define RATE_CVT_CFG(_src_rate, _dest_rate, _channel)                                        \
+     (esp_ae_rate_cvt_cfg_t) {                                                                \
+@@ -311,6 +312,13 @@
+             int samples = 160;  // 10ms
+             std::vector<int16_t> data;
+             if (ReadAudioData(data, 16000, samples)) {
++                if (bits & AS_EVENT_AUDIO_PROCESSOR_RUNNING) {
++                    uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000);
++                    input_seen_ms_ = now;
++                    if (InputQuiet::HasSoundActivity(data.data(), data.size(),
++                                                     codec_->input_channels()))
++                        input_sound_ms_ = now;
++                }
+                 audio_engine_->Feed(std::move(data));
+                 continue;
+             }
+@@ -706,6 +714,14 @@
+ #endif
+ }
+ 
++bool AudioService::CanYieldQuietListening(bool waiting_for_reply, bool manual) {
++    if (!IsAudioProcessorRunning())
++        return false;
++    return InputQuiet::CanYield(
++        static_cast<uint32_t>(esp_timer_get_time() / 1000), input_observation_started_ms_.load(),
++        input_seen_ms_.load(), input_sound_ms_.load(), waiting_for_reply, manual, IsPlaybackIdle());
++}
++
+ void AudioService::EnableVoiceProcessing(bool enable) {
+     ESP_LOGD(TAG, "%s voice processing", enable ? "Enabling" : "Disabling");
+ 
+@@ -721,6 +737,9 @@
+                 esp_ae_rate_cvt_reset(input_resampler_);
+             }
+         }
++        uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000);
++        input_observation_started_ms_ = input_sound_ms_ = now;
++        input_seen_ms_ = 0;
+         audio_engine_->EnableVoiceProcessing(true);
+         xEventGroupSetBits(event_group_, AS_EVENT_AUDIO_PROCESSOR_RUNNING);
+     } else {
+--- a/main/audio/audio_service.h
++++ b/main/audio/audio_service.h
+@@ -122,6 +122,7 @@
+     void EncodeWakeWord();
+     std::unique_ptr<AudioStreamPacket> PopWakeWordPacket();
+     const std::string& GetLastWakeWord() const;
++    bool CanYieldQuietListening(bool waiting_for_reply, bool manual);
+     bool IsVoiceDetected() const { return voice_detected_; }
+     bool IsIdle();
+     bool IsPlaybackIdle();
+@@ -199,6 +200,7 @@
+ 
+     bool audio_engine_initialized_ = false;
+     bool voice_detected_ = false;
++    std::atomic<uint32_t> input_observation_started_ms_{0}, input_seen_ms_{0}, input_sound_ms_{0};
+ #if CONFIG_USE_DEVICE_AEC
+     bool device_aec_enabled_ = true;
+ #else
+--- a/main/boards/folotoy/ai-passport/ai_passport_board.cc
++++ b/main/boards/folotoy/ai-passport/ai_passport_board.cc
+@@ -1,12 +1,13 @@
+-#include "wifi_board.h"
++#include "application.h"
++#include "assets/lang_config.h"
++#include "button.h"
++#include "codecs/es8311_audio_codec.h"
++#include "codex_notify.h"
++#include "config.h"
++#include "cw2017_battery_monitor.h"
+ #include "display/lcd_display.h"
+ #include "muse_style_display.h"
+-#include "codecs/es8311_audio_codec.h"
+-#include "application.h"
+-#include "button.h"
+-#include "config.h"
+-#include "assets/lang_config.h"
+-#include "cw2017_battery_monitor.h"
++#include "wifi_board.h"
+ 
+ #include <esp_log.h>
+ #include <esp_lcd_panel_vendor.h>
+@@ -230,6 +231,12 @@
+         GetBacklight()->RestoreBrightness();
+     }
+ 
++    void StartNetwork() override {
++        WifiBoard::StartNetwork();
++        static CodexNotify codex_notify;
++        codex_notify.Start();
++    }
++
+     virtual AudioCodec* GetAudioCodec() override {
+         static Es8311AudioCodec audio_codec(
+             codec_i2c_bus_,
+--- a/main/idf_component.yml
++++ b/main/idf_component.yml
+@@ -1,5 +1,6 @@
+ ## IDF Component Manager Manifest File
+ dependencies:
++  espressif/mqtt: ^1.0.0
+   waveshare/esp_lcd_sh8601: 1.0.2
+   espressif/esp_lcd_co5300: ^2.1.0
+   espressif/esp_lcd_ili9341: ^2.1.0
+--- a/main/ota.cc
++++ b/main/ota.cc
+@@ -1,3 +1,4 @@
++#include "wall_clock.h"
+ #include "ota.h"
+ #include "system_info.h"
+ #include "settings.h"
+@@ -201,6 +202,9 @@
+             struct timeval tv;
+             double ts = timestamp->valuedouble;
+             
++            WallClock::timezone_offset_minutes.store(
++                cJSON_IsNumber(timezone_offset) ? timezone_offset->valueint : 0);
++
+             // 如果有时区偏移，计算本地时间
+             if (cJSON_IsNumber(timezone_offset)) {
+                 ts += (timezone_offset->valueint * 60 * 1000); // 转换分钟为毫秒

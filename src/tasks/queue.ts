@@ -180,7 +180,11 @@ export class TaskQueue {
       task_id: tid,
       project_id: row.project_id,
       status: row.status,
-      spoken_summary: progress[row.status] ?? row.spoken_summary ?? `任务 ${tid} 已结束。`,
+      spoken_summary: progress[row.status] ?? (row.error_code === 'CODEX_FAILED'
+        ? (/request timed out/i.test(row.detailed_result ?? '')
+          ? `任务 ${tid} 因连接 Codex 服务超时而失败，可以稍后重试。`
+          : `任务 ${tid} 执行失败，具体原因请在电脑日志中确认。`)
+        : row.spoken_summary) ?? `任务 ${tid} 已结束。`,
       error_code: row.error_code,
     };
   }

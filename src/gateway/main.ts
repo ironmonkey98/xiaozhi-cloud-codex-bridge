@@ -1,4 +1,9 @@
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { spawn, type ChildProcess } from 'node:child_process';
+import { NotificationOutbox } from '../notifications/outbox.ts';
+import { notificationConfigSchema } from '../notifications/signal.ts';
 import { MockCodexRunner, SdkCodexRunner } from '../codex/runner.ts';
 import { loadDotEnv, loadGatewayConfig, loadProjects } from '../config.ts';
 import { log } from '../security/redact.ts';
@@ -16,9 +21,27 @@ const purged = store.purgeOlderThan(Date.now() - projects.taskRetentionDays * 86
 
 const runner = config.codexMock ? new MockCodexRunner() : new SdkCodexRunner();
 const queue = new TaskQueue({ store, runner, projects, timeoutMs: config.taskTimeoutMs, maxQueue: config.maxQueue });
-const server = createGatewayServer({ token: config.token, queue, projects, runner });
+const root = resolve(import.meta.dirname, '../..');
+const notifyPath = join(root, 'config/notify.local.json');
+const notifyConfig = !config.codexMock && existsSync(notifyPath)
+  ? notificationConfigSchema.parse(JSON.parse(readFileSync(notifyPath, 'utf8'))) : undefined;
+const binding = notifyConfig ? createHash('sha256').update(`${notifyConfig.namespace}:${notifyConfig.device_id}`).digest('hex').slice(0, 16) : '';
+const notifications = notifyConfig ? { namespace: notifyConfig.namespace, outbox: new NotificationOutbox(join(root, 'data', `notify-${binding}.sqlite`)) } : undefined;
+const server = createGatewayServer({ token: config.token, queue, projects, runner, notifications });
+let notifyChild: ChildProcess | undefined;
+let stopping = false;
+function startNotifications(): void {
+  if (!notifications || stopping) return;
+  notifyChild = spawn(process.execPath, [join(root, 'scripts/notify-relay.ts')], { cwd: root, stdio: ['ignore', 'inherit', 'inherit'] });
+  if (notifyChild.pid) writeFileSync(join(root, 'data/notify-relay.pid'), String(notifyChild.pid), { mode: 0o600 });
+  notifyChild.on('error', () => log('warn', 'notification relay failed to start'));
+  notifyChild.once('exit', () => {
+    if (!stopping) setTimeout(startNotifications, 5000);
+  });
+}
 
 server.listen(config.port, config.host, () => {
+  startNotifications();
   log('info', 'gateway listening', {
     host: config.host,
     port: config.port,
@@ -29,15 +52,16 @@ server.listen(config.port, config.host, () => {
   });
 });
 
-let stopping = false;
 function shutdown(signal: string): void {
   if (stopping) return;
   stopping = true;
+  notifyChild?.kill('SIGTERM');
   log('info', 'gateway stopping', { signal });
   queue.abortAll();
   server.close();
   void queue.idle().finally(() => {
     store.close();
+    notifications?.outbox.close();
     process.exit(0);
   });
 }

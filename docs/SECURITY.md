@@ -41,3 +41,9 @@
 ## 配置依据与决策
 
 Codex 的临时目录排除项与附加可写根目录定义见 [官方配置参考](https://learn.chatgpt.com/docs/config-file/config-reference)，自动执行与网络配置见 [官方权限说明](https://learn.chatgpt.com/docs/agent-approvals-security)。初始语音写入决策见 ADR 0002，本次依赖与联网授权见 [ADR 0003](adr/0003-workspace-dependencies-and-network.md)。
+
+## 结果通知通道
+
+云端 MQTT 仅传固定结构的事件 ID、任务 ID、类型和到期时间；设备与 Gateway 使用不同凭据和互反主题 ACL。设备凭据不包含本机 Bearer 或 Codex 凭据。专用工具 `codex_get_notifications` 的身份仍由本机 namespace 配置决定，无路径、设备 ID 或自由指令参数；只写通知查询回执，不修改任务状态或执行新任务。结果文本仅通过既有官方 MCP/语音链路返回。
+
+查询音频为固件内固定内容，通知会话关闭麦克风；安静检测只在现有输入流计算幅度，不保存或新增上传环境录音。只有当前查询回执和固件音频排空确认共同成立才清队列，软件 probe 不能冒充固件成功。凭据文件、Flash 备份和构建私有头均忽略提交。

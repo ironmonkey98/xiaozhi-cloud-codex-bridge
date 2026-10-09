@@ -161,6 +161,16 @@ describe('TaskQueue（Mock Codex）', () => {
     assert.ok(!view.spoken_summary.includes('mock codex failure'));
   });
 
+  it('连接超时提供可理解的播报原因，原始错误和凭据不外传', () => {
+    const {queue, store} = setup();
+    const row = store.insert({namespace: NS, projectId: 'desk', kind: 'submit', instruction: '测试', clientRequestId: null});
+    store.transition(row.id, ['queued'], 'failed', {error_code: 'CODEX_FAILED', detailed_result: 'Reconnecting... 2/5 (request timed out) secret=PRIVATE'});
+    const view = queue.get(NS, `T-${row.id}`);
+    assert.match(view.spoken_summary, /连接 Codex 服务超时/);
+    assert.ok(!view.spoken_summary.includes('PRIVATE'));
+    store.close();
+  });
+
   it('队列上限：溢出返回 TASK_BUSY', async () => {
     const { queue } = setup({ delayMs: 100, maxQueue: 2 });
     queue.submit(NS, { project_id: 'demo', instruction: '一' }, 'submit');

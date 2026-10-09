@@ -7,7 +7,7 @@
    ⇅ WSS（Mac 主动出站，接入点）
 mcp_pipe.py（78/mcp-calculator，固定 commit）
    ⇅ stdio
-dist/mcp/stdio.js（薄适配，7 个工具）      ← 可随断线重启
+dist/mcp/stdio.js（薄适配，8 个工具）      ← 可随断线重启
    ⇅ 127.0.0.1 + Bearer
 dist/gateway/main.js（常驻：SQLite 队列/会话/权限）  ← 任务不随断线丢失
    ⇅ @openai/codex-sdk（按项目配置 read-only / workspace-write sandbox）
@@ -39,7 +39,7 @@ npm run mcp:call -- codex_get_latest_task
 1. 浏览器打开 <https://xiaozhi.me/console/agents> → 选择智能体 → MCP 设置 → 获取 MCP 接入点，复制完整 `wss://…` 地址。
 2. 写入本机 `.env` 的 `XIAOZHI_MCP_ENDPOINT=`（**不要发到聊天、不要提交**）。
 3. `npm run setup:pipe`（一次性，安装到仓库内 `external/`）。
-4. Gateway 运行中，执行 `npm run pipe`；控制台刷新接入点状态，应看到 7 个 `codex_*` 工具。
+4. Gateway 运行中，执行 `npm run pipe`；控制台刷新接入点状态，应看到 8 个 `codex_*` 工具。
 5. 对小智说“测试本机连接”。
 
 详见 [docs/DEPLOY_XIAOZHI_CLOUD.md](docs/DEPLOY_XIAOZHI_CLOUD.md)。
@@ -52,6 +52,7 @@ npm run mcp:call -- codex_get_latest_task
 | `codex_list_projects` | — | 允许的项目别名（不含路径） |
 | `codex_submit` | `project_id`, `instruction`, `client_request_id?` | 按项目授权提交任务，开启新会话，立即返回任务号 |
 | `codex_continue` | `project_id`, `instruction`, `client_request_id?` | 在该项目当前会话上续话 |
+| `codex_get_notifications` | 无 | 领取待播报的已结束任务批次，合并播报 |
 | `codex_get_task` | `task_id` | 按任务号查询 |
 | `codex_get_latest_task` | `project_id?` | 查询“刚才的任务” |
 | `codex_cancel_task` | `task_id` | 取消排队/运行中的任务 |

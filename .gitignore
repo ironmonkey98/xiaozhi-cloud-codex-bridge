@@ -4,6 +4,7 @@ dist/
 .env.*
 !.env.example
 config/projects.json
+config/notify.local.json
 data/
 external/
 .DS_Store

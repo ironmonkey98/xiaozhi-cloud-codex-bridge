@@ -7,6 +7,7 @@ import { loadProjects } from '../../src/config.ts';
 import { createGatewayServer, NAMESPACE_HEADER } from '../../src/gateway/http.ts';
 import { TaskQueue } from '../../src/tasks/queue.ts';
 import { TaskStore } from '../../src/tasks/store.ts';
+import { NotificationOutbox } from '../../src/notifications/outbox.ts';
 import { makeFixture, TEST_TOKEN } from '../helpers.ts';
 
 describe('gateway HTTP', () => {
@@ -15,7 +16,8 @@ describe('gateway HTTP', () => {
   const store = new TaskStore(join(fx.dataDir, 'tasks.sqlite'));
   const runner = new MockCodexRunner(10);
   const queue = new TaskQueue({ store, runner, projects, timeoutMs: 5000, maxQueue: 10 });
-  const server = createGatewayServer({ token: TEST_TOKEN, queue, projects, runner });
+  const outbox = new NotificationOutbox(':memory:');
+  const server = createGatewayServer({ token: TEST_TOKEN, queue, projects, runner, notifications: { namespace: 'ns-a', outbox } });
   let base = '';
   const auth = { authorization: `Bearer ${TEST_TOKEN}`, [NAMESPACE_HEADER]: 'ns-a' };
 
@@ -27,6 +29,7 @@ describe('gateway HTTP', () => {
     await queue.idle();
     server.close();
     store.close();
+    outbox.close();
   });
 
   it('缺少或错误的 Bearer 令牌返回 401', async () => {
@@ -85,5 +88,25 @@ describe('gateway HTTP', () => {
     });
     assert.equal(res.status, 400);
     assert.equal((await res.json()).code, 'INVALID_REQUEST');
+  });
+
+  it('通知批次按身份隔离，返回准确终态任务而不误查最新排队任务', async () => {
+    const now = Date.now();
+    const completed = store.insert({namespace: 'ns-a', projectId: 'desk', kind: 'submit', instruction: '通知测试', clientRequestId: null}, now);
+    store.transition(completed.id, ['queued'], 'succeeded', {spoken_summary: '文件已生成'}, now);
+    store.insert({namespace: 'ns-a', projectId: 'desk', kind: 'submit', instruction: '较新任务', clientRequestId: null}, now + 1);
+    outbox.discover('ns-a', `T-${completed.id}`, now, now);
+    const hint = outbox.due(now)[0]!;
+    outbox.sent(hint.event_id, now);
+    const foreign = await (await fetch(`${base}/internal/notifications/pending`, {headers: {...auth, [NAMESPACE_HEADER]: 'ns-b'}})).json();
+    assert.deepEqual(foreign.tasks, []);
+    assert.equal(outbox.queryServed().length, 0);
+    const body = await (await fetch(`${base}/internal/notifications/pending`, {headers: auth})).json();
+    assert.equal(body.batch_id, hint.event_id);
+    assert.equal(body.tasks.length, 1);
+    assert.equal(body.tasks[0].task_id, `T-${completed.id}`);
+    assert.equal(body.tasks[0].status, 'succeeded');
+    assert.equal(body.tasks[0].spoken_summary, '文件已生成');
+    assert.equal(outbox.queryServed().length, 1);
   });
 });

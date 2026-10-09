@@ -69,13 +69,14 @@ describe('MCP stdio 合同（dist/mcp/stdio.js）', () => {
     gateway.kill('SIGTERM');
   });
 
-  it('tools/list 公布 7 个工具，且 schema 中没有 device_id / 路径参数', async () => {
+  it('tools/list 公布 8 个工具，且 schema 中没有 device_id / 路径参数', async () => {
     const { client } = await connect();
     const { tools } = await client.listTools();
     assert.deepEqual(tools.map((t) => t.name).sort(), [
       'codex_cancel_task',
       'codex_continue',
       'codex_get_latest_task',
+      'codex_get_notifications',
       'codex_get_task',
       'codex_list_projects',
       'codex_ping',
@@ -97,6 +98,15 @@ describe('MCP stdio 合同（dist/mcp/stdio.js）', () => {
     const list = await call(client, 'codex_list_projects');
     assert.equal(list.data.projects.length, 2);
     assert.match(list.data.spoken_summary, /演示项目、桌面工作区（可写）/);
+    await client.close();
+  });
+
+  it('待播报通知工具在未配置通知时安全返回空批次', async () => {
+    const {client} = await connect();
+    const result = await call(client, 'codex_get_notifications');
+    assert.equal(result.isError, false);
+    assert.deepEqual(result.data.tasks, []);
+    assert.equal(result.data.batch_id, null);
     await client.close();
   });
 
