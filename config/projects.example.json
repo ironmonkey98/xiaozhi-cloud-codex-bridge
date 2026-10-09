@@ -1,0 +1,13 @@
+{
+  "projects": [
+    {
+      "project_id": "demo",
+      "display_name": "演示代码项目",
+      "workspace": "/ABSOLUTE/PATH/TO/ISOLATED_DEMO",
+      "mode": "read-only"
+    }
+  ],
+  "max_concurrent_tasks": 1,
+  "voice_summary_max_chars": 200,
+  "task_retention_days": 7
+}

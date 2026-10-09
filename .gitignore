@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+config/projects.json
+data/
+external/
+.DS_Store
+*.log

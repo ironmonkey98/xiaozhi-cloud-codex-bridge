@@ -1,0 +1,35 @@
+{
+  "name": "xiaozhi-cloud-codex-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "^2.3.1",
+    "@openai/codex-sdk": "^0.162.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "^2.3.1",
+    "@types/node": "^26.6.4",
+    "typescript": "^7.0.2"
+  },
+  "scripts": {
+    "build": "tsc -p .",
+    "typecheck": "tsc -p . --noEmit && tsc -p tests/tsconfig.json",
+    "test": "node --test --test-concurrency=4 \"tests/unit/**/*.test.ts\" \"tests/integration/**/*.test.ts\"",
+    "test:mcp": "npm run build && node --test \"tests/contract/**/*.test.ts\"",
+    "start:daemon": "node dist/gateway/main.js",
+    "dev": "node src/gateway/main.ts",
+    "mcp": "node dist/mcp/stdio.js",
+    "doctor": "node scripts/doctor.ts",
+    "setup:demo": "bash scripts/setup-demo.sh",
+    "setup:pipe": "bash scripts/setup-pipe.sh",
+    "pipe": "bash scripts/start-pipe.sh",
+    "test:e2e": "RUN_CODEX_E2E=1 node --test --test-concurrency=1 tests/e2e/codex-real.test.ts",
+    "mcp:call": "node scripts/mcp-call.ts",
+    "test:pipe": "npm run build && node --test tests/e2e/pipe-compat.test.ts"
+  }
+}
