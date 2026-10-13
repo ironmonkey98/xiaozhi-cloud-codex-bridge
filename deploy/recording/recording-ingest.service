@@ -1,0 +1,24 @@
+[Unit]
+Description=AI Passport recording ingest (MQTT -> Ogg/Opus)
+After=network-online.target mosquitto.service
+Wants=mosquitto.service
+
+[Service]
+Type=simple
+User=recording
+Group=recording
+WorkingDirectory=/opt/recording-ingest
+Environment=RECORDING_CONFIG=/etc/recording-ingest/recording.json
+ExecStart=/opt/recording-ingest/node/bin/node src/recording/main.ts
+Restart=on-failure
+RestartSec=5
+# Hardening: the service only needs its data directory.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/recording-ingest
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target

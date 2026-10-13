@@ -1,0 +1,13 @@
+# Appended to /etc/mosquitto/acl-xiaozhi-notify (see deploy/recording/README.md).
+# Recording topics only; the existing notify rules above are unchanged and
+# bridge-gateway gets no access to recordings.
+
+user recording-ingest
+topic read devices/passport-01/recording/request
+topic read devices/passport-01/recording/audio
+topic write devices/passport-01/recording/ack
+
+user passport-01
+topic write devices/passport-01/recording/request
+topic write devices/passport-01/recording/audio
+topic read devices/passport-01/recording/ack

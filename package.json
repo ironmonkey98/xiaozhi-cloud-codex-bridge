@@ -34,6 +34,9 @@
     "test:pipe": "npm run build && node --test tests/e2e/pipe-compat.test.ts",
     "notify:relay": "node scripts/notify-relay.ts",
     "notify:probe": "node scripts/probe-notify.ts",
-    "notify:device": "node scripts/probe-query-device.ts"
+    "notify:device": "node scripts/probe-query-device.ts",
+    "test:recording": "node --test --test-concurrency=1 tests/e2e/recording-mqtt.test.ts",
+    "recording:ingest": "node src/recording/main.ts",
+    "recording:sim": "node scripts/recording-sim.ts"
   }
 }
