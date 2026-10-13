@@ -74,7 +74,7 @@ describe('mcp_pipe.py ↔ stdio 适配器', { skip: !existsSync(PIPE) && '未安
     const init = events.get('initialize#1');
     assert.equal(init.serverInfo.name, 'xiaozhi-codex-bridge');
     assert.ok(init.protocolVersion, '协商出协议版本');
-    assert.equal(events.get('tools').length, 8);
+    assert.equal(events.get('tools').length, 11);
     assert.equal(events.get('submit').status, 'queued');
     assert.ok(events.get('initialize#2'), 'mcp_pipe 已重连');
     assert.equal(latest.task_id, events.get('submit').task_id);

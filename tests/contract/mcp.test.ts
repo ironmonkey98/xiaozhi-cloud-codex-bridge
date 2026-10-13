@@ -69,7 +69,7 @@ describe('MCP stdio 合同（dist/mcp/stdio.js）', () => {
     gateway.kill('SIGTERM');
   });
 
-  it('tools/list 公布 8 个工具，且 schema 中没有 device_id / 路径参数', async () => {
+  it('tools/list 公布 11 个工具，且 schema 中没有 device_id / 路径参数', async () => {
     const { client } = await connect();
     const { tools } = await client.listTools();
     assert.deepEqual(tools.map((t) => t.name).sort(), [
@@ -81,6 +81,9 @@ describe('MCP stdio 合同（dist/mcp/stdio.js）', () => {
       'codex_list_projects',
       'codex_ping',
       'codex_submit',
+      'recording_get_transcript',
+      'recording_list',
+      'recording_to_codex',
     ]);
     const schemas = JSON.stringify(tools.map((t) => t.inputSchema));
     assert.ok(!/device_id|path|workspace|directory/.test(schemas));
@@ -107,6 +110,16 @@ describe('MCP stdio 合同（dist/mcp/stdio.js）', () => {
     assert.equal(result.isError, false);
     assert.deepEqual(result.data.tasks, []);
     assert.equal(result.data.batch_id, null);
+    await client.close();
+  });
+
+  it('录音未配置时三个工具返回稳定错误', async () => {
+    const { client } = await connect();
+    for (const name of ['recording_list', 'recording_get_transcript', 'recording_to_codex']) {
+      const result = await call(client, name, name === 'recording_to_codex' ? { project_id: 'demo', instruction: '概括录音' } : {});
+      assert.equal(result.isError, true);
+      assert.equal(result.data.code, 'RECORDING_NOT_CONFIGURED');
+    }
     await client.close();
   });
 

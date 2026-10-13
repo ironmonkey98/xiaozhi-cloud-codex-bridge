@@ -4,7 +4,9 @@ import type { CodexRunner } from '../codex/runner.ts';
 import type { ProjectsConfig } from '../config.ts';
 import { log } from '../security/redact.ts';
 import { BridgeError } from '../shared/errors.ts';
-import { namespaceSchema, submitBodySchema } from '../shared/schemas.ts';
+import { namespaceSchema, submitBodySchema, recordingListInputSchema, recordingTranscriptInputSchema, recordingSubmitInputSchema } from '../shared/schemas.ts';
+import { RecordingClient } from './recording-client.ts';
+import { RecordingTools } from './recording-tools.ts';
 import type { TaskQueue } from '../tasks/queue.ts';
 import type { NotificationOutbox } from '../notifications/outbox.ts';
 
@@ -16,6 +18,7 @@ const READY_CACHE_MS = 60_000;
 const LOOPBACK_HOST = /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/;
 
 export interface GatewayDeps {
+  recording?: RecordingClient;
   token: string;
   queue: TaskQueue;
   projects: ProjectsConfig;
@@ -54,6 +57,7 @@ async function readJson(req: IncomingMessage): Promise<unknown> {
 }
 
 export function createGatewayServer(deps: GatewayDeps): Server {
+  const recording = new RecordingTools(deps.recording ?? new RecordingClient(), deps.projects, deps.queue);
   let readyCache: { value: boolean; at: number } | null = null;
   const codexReady = async (): Promise<boolean> => {
     if (!readyCache || Date.now() - readyCache.at > READY_CACHE_MS) {
@@ -82,6 +86,24 @@ export function createGatewayServer(deps: GatewayDeps): Server {
     const ns = namespaceSchema.safeParse(req.headers[NAMESPACE_HEADER]);
     if (!ns.success) throw new BridgeError('AUTH_REQUIRED', '缺少接入点身份。');
     const namespace = ns.data;
+
+    if (req.method === 'POST' && path.startsWith('/internal/recordings/')) {
+      const schemas = {
+        '/internal/recordings/list': recordingListInputSchema,
+        '/internal/recordings/transcript': recordingTranscriptInputSchema,
+        '/internal/recordings/submit': recordingSubmitInputSchema,
+      };
+      const schema = schemas[path as keyof typeof schemas];
+      if (!schema) throw new BridgeError('INVALID_REQUEST', '未知录音接口。');
+      const body = await readJson(req);
+      if (!schema.safeParse(body).success) throw new BridgeError('INVALID_REQUEST', '录音请求格式不正确。');
+      if (path === '/internal/recordings/list') return send(res, 200, { ok: true, ...await recording.list() });
+      if (path === '/internal/recordings/transcript') {
+        const input = recordingTranscriptInputSchema.parse(body);
+        return send(res, 200, { ok: true, ...await recording.getTranscript(input.recording_id) });
+      }
+      return send(res, 202, { ok: true, ...await recording.submit(namespace, recordingSubmitInputSchema.parse(body)) });
+    }
 
     if (req.method === 'GET' && path === '/internal/notifications/pending') {
       const signals = deps.notifications?.namespace === namespace ? deps.notifications.outbox.queryBatch() : [];

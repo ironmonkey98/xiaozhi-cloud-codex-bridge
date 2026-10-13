@@ -70,7 +70,7 @@ export class TaskQueue {
     this.opts = opts;
   }
 
-  submit(namespace: string, input: SubmitInput, kind: TaskKind): SubmitResult {
+  submit(namespace: string, input: SubmitInput, kind: TaskKind, context?: { text: string; prepare?: () => void }): SubmitResult {
     const project = this.opts.projects.projects.get(input.project_id);
     if (!project) throw new BridgeError('PROJECT_NOT_ALLOWED', '这个项目不在允许列表里，请先在电脑上配置。');
     assertInstructionAllowed(input.instruction, project.mode);
@@ -79,7 +79,7 @@ export class TaskQueue {
       namespace,
       projectId: project.id,
       kind,
-      instruction: input.instruction,
+      instruction: input.instruction + (context?.text ?? ''),
       clientRequestId: input.client_request_id ?? null,
     };
     const existing = newTask.clientRequestId
@@ -91,6 +91,8 @@ export class TaskQueue {
       throw new BridgeError('TASK_BUSY', '电脑上的任务已经排满了，请等前面的任务完成后再试。');
     }
 
+    // 仅 Gateway 提供的数据附件；在授权、去重和队列检查之后准备，不接受工具参数指定路径。
+    context?.prepare?.();
     const row = this.opts.store.insert(newTask);
     this.pending.push(row.id);
     void this.drain();

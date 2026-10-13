@@ -29,3 +29,13 @@ export const submitBodySchema = z.object({
 });
 
 export type SubmitBody = z.infer<typeof submitBodySchema>;
+
+export const recordingIdSchema = z.string().regex(/^[a-f0-9]{32}$/).describe('录音编号，省略时选择最近已转写完成的录音');
+export const recordingListInputSchema = z.object({}).strict();
+export const recordingTranscriptInputSchema = z.object({ recording_id: recordingIdSchema.optional() }).strict();
+export const recordingSubmitInputSchema = z.object({
+  project_id: projectIdSchema,
+  instruction: instructionSchema,
+  recording_id: recordingIdSchema.optional(),
+  client_request_id: clientRequestIdSchema,
+}).strict();

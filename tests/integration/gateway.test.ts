@@ -22,7 +22,10 @@ describe('gateway HTTP', () => {
   const auth = { authorization: `Bearer ${TEST_TOKEN}`, [NAMESPACE_HEADER]: 'ns-a' };
 
   before(async () => {
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', () => { server.off('error', reject); resolve(); });
+    });
     base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   });
   after(async () => {

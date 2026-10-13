@@ -10,6 +10,7 @@ import { log } from '../security/redact.ts';
 import { TaskQueue } from '../tasks/queue.ts';
 import { TaskStore } from '../tasks/store.ts';
 import { createGatewayServer } from './http.ts';
+import { RecordingClient } from './recording-client.ts';
 
 loadDotEnv();
 const config = loadGatewayConfig();
@@ -27,7 +28,7 @@ const notifyConfig = !config.codexMock && existsSync(notifyPath)
   ? notificationConfigSchema.parse(JSON.parse(readFileSync(notifyPath, 'utf8'))) : undefined;
 const binding = notifyConfig ? createHash('sha256').update(`${notifyConfig.namespace}:${notifyConfig.device_id}`).digest('hex').slice(0, 16) : '';
 const notifications = notifyConfig ? { namespace: notifyConfig.namespace, outbox: new NotificationOutbox(join(root, 'data', `notify-${binding}.sqlite`)) } : undefined;
-const server = createGatewayServer({ token: config.token, queue, projects, runner, notifications });
+const server = createGatewayServer({ token: config.token, queue, projects, runner, notifications, recording: new RecordingClient(config.recording) });
 let notifyChild: ChildProcess | undefined;
 let stopping = false;
 function startNotifications(): void {

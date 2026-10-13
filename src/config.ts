@@ -36,6 +36,7 @@ export interface ProjectsConfig {
 }
 
 export interface GatewayConfig {
+  recording?: RecordingApiConfig;
   host: string;
   port: number;
   token: string;
@@ -44,6 +45,26 @@ export interface GatewayConfig {
   codexMock: boolean;
   taskTimeoutMs: number;
   maxQueue: number;
+}
+
+export interface RecordingApiConfig {
+  url: string;
+  token: string;
+}
+
+export function loadRecordingConfig(env: NodeJS.ProcessEnv = process.env): RecordingApiConfig | undefined {
+  const url = env.RECORDING_API_URL || '';
+  const token = env.RECORDING_API_TOKEN || '';
+  if (!url && !token) return undefined;
+  try {
+    const parsed = new URL(url);
+    const testLoopback = env.NODE_ENV === 'test' && parsed.protocol === 'http:' && parsed.hostname === '127.0.0.1';
+    if ((parsed.protocol !== 'https:' && !testLoopback) || parsed.username || parsed.password || parsed.search || parsed.hash
+      || !/^[a-fA-F0-9]{64}$/.test(token)) throw new Error();
+    return { url: parsed.href.replace(/\/$/, ''), token };
+  } catch {
+    throw new Error('录音 API 配置无效：需要 HTTPS 基址和 64 位 hex 令牌。');
+  }
 }
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', 'localhost']);
@@ -74,6 +95,7 @@ export function loadGatewayConfig(env: NodeJS.ProcessEnv = process.env): Gateway
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('GATEWAY_PORT 非法');
 
   return {
+    recording: loadRecordingConfig(env),
     host,
     port,
     token: readToken(env),

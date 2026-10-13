@@ -30,7 +30,7 @@ export interface CodexRunner {
 }
 
 /** 不传给 Codex 子进程的环境变量：本桥接自身的密钥。 */
-const SECRET_ENV_KEYS = new Set(['LOCAL_BRIDGE_TOKEN', 'XIAOZHI_MCP_ENDPOINT', 'MCP_ENDPOINT']);
+const SECRET_ENV_KEYS = new Set(['LOCAL_BRIDGE_TOKEN', 'XIAOZHI_MCP_ENDPOINT', 'MCP_ENDPOINT', 'RECORDING_API_TOKEN', 'RECORDING_API_URL']);
 
 function codexChildEnv(): Record<string, string> {
   const env: Record<string, string> = {};

@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { SdkCodexRunner } from '../src/codex/runner.ts';
-import { loadDotEnv, loadGatewayConfig, loadProjects } from '../src/config.ts';
+import { loadDotEnv, loadGatewayConfig, loadProjects, loadRecordingConfig } from '../src/config.ts';
 import { redact } from '../src/security/redact.ts';
 
 type Status = 'OK' | 'WARN' | 'FAIL';
@@ -29,6 +29,13 @@ if (!existsSync(envPath)) {
 } else {
   const mode = statSync(envPath).mode & 0o777;
   report(mode & 0o077 ? 'WARN' : 'OK', '.env 权限', `${mode.toString(8)}（建议 chmod 600 .env）`);
+}
+
+try {
+  const configured = Boolean(loadRecordingConfig());
+  report(configured ? 'OK' : 'WARN', '录音 API', configured ? '已配置' : '未配置');
+} catch {
+  report('FAIL', '录音 API', '未配置');
 }
 
 let config: ReturnType<typeof loadGatewayConfig> | null = null;
