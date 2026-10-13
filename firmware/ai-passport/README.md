@@ -23,3 +23,14 @@
 ESP-IDF v6.1 构建、100项 host 测试、UI 保留检查通过。真实设备固定查询句被 ASR 识别，云端调用专用 MCP 工具，播报冻结批次并返回播放完成回执；T-18 重放与新任务 T-19 均完成该链路。原 UI 渲染保持。安静待听分支的实机结论见实施报告。
 
 旧 detect 文本方案被官方云端拒绝，仅唤醒词也不会自动查询，均已由正常音频输入方案替代。普通官方 OTA 会覆盖改动，升级需继续使用这一原 UI 基线。
+
+## 在线录音与性能优化（2026-10-13 实机验证）
+
+在上面的通知改造之上应用 `recording.patch`，并复制 `recorder_core.h`、`passport_recorder.h`、`recording_overlay.h` 到 `main/boards/folotoy/ai-passport/`。完整提交历史在固件仓库 `xiaozhi-esp32` 的 `passport-recording` 分支（基于上游 `ed5cd7b`）。
+
+- 操作：OK **长按** 开始/停止；录音中单击 OK 不会开启对话。全屏录音界面（LVGL 顶层）显示 REC 闪烁点、像素计时、实时音量条、**云端已落盘时长**与状态灯（绿=已确认、黄=积压、红=断网）；结束显示“已保存 / 部分保存 / 录音失败”。只有云端 `finish_ack: saved` 才显示“已保存”。
+- 互斥：录音期间设备处于 `recording` 状态，唤醒词关闭、不开对话；通知查询要求 idle，因此自动排队。
+- 传输：复用通知 MQTT/WSS 连接与设备账号，`devices/<id>/recording/{request,audio,ack}`。音频 QoS0 + 云端累计 ACK，独立发送任务 Go-Back-N 重传；8 KiB 发送窗口仅在会话期间分配。
+- 性能（FreeRTOS 运行时统计，5 分钟固定流程）：待机 LVGL 44% → 17%，播报时空闲 CPU 4% → 21%，开机最低 Heap 26 → 34 KB。头像帧率按状态（待机/播报 12.5 fps，聆听/思考 25 fps），待机光晕静态，被覆盖时不渲染。
+- **UI 检查基线变更**：`recording.patch` 包含 `main/display/muse_style/` 的性能修改（像素画面不变，仅帧率与待机光晕）。运行 `verify-passport-ui.py` 时，以应用了本补丁的树作为基线。
+- 实测：录音 64 s 两次 saved（0 丢帧、0 重传）；服务重启时如实降级为 partial；转写由云端百炼完成并可经 MCP `recording_*` 查询。60 分钟耐久（R07）尚未测。

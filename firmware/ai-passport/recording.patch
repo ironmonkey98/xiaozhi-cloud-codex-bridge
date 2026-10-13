@@ -1,0 +1,426 @@
+diff --git a/main/application.cc b/main/application.cc
+index 8752415..2bc7bf7 100644
+--- a/main/application.cc
++++ b/main/application.cc
+@@ -243,6 +243,12 @@ void Application::Run() {
+         }
+ 
+         if (bits & MAIN_EVENT_SEND_AUDIO) {
++            if (GetDeviceState() == kDeviceStateRecording) {
++                // Recording never reaches the conversation protocol.
++                while (auto packet = audio_service_.PopPacketFromSendQueue()) {
++                    if (recording_sink_) recording_sink_(std::move(packet));
++                }
++            }
+             while (auto packet = audio_service_.PopPacketFromSendQueue()) {
+                 if (query_active_)
+                     continue;  // Never mix microphone frames into a fixed query.
+@@ -1082,6 +1088,40 @@ void Application::FinishNotificationQuery(bool success) {
+         done(success);
+ }
+ 
++bool Application::EnterRecording(std::function<void(std::unique_ptr<AudioStreamPacket>)> sink) {
++    if (query_active_ || GetDeviceState() != kDeviceStateIdle) {
++        return false;
++    }
++    recording_sink_ = std::move(sink);
++    if (!SetDeviceState(kDeviceStateRecording)) {
++        recording_sink_ = nullptr;
++        return false;
++    }
++    return true;
++}
++
++void Application::StartRecordingAudio() {
++    if (GetDeviceState() == kDeviceStateRecording) {
++        audio_service_.EnableVoiceProcessing(true);
++    }
++}
++
++void Application::StopRecordingAudio() {
++    // Stays in the recording state until the cloud answers the stop.
++    if (GetDeviceState() == kDeviceStateRecording) {
++        audio_service_.EnableVoiceProcessing(false);
++    }
++}
++
++void Application::LeaveRecording() {
++    if (GetDeviceState() != kDeviceStateRecording) {
++        return;
++    }
++    audio_service_.EnableVoiceProcessing(false);
++    recording_sink_ = nullptr;
++    SetDeviceState(kDeviceStateIdle);
++}
++
+ bool Application::RequestNotificationWake(const std::string& task_id) {
+     if (!protocol_ || GetDeviceState() != kDeviceStateIdle || task_id.size() < 3 ||
+         task_id.size() > 14 || task_id.substr(0, 2) != "T-" ||
+@@ -1236,6 +1276,11 @@ void Application::HandleStateChangedEvent() {
+             audio_service_.EnableVoiceProcessing(false);
+             audio_service_.EnableWakeWordDetection(false);
+             break;
++        case kDeviceStateRecording:
++            // Capture starts only after the cloud accepts the session (StartRecordingAudio).
++            audio_service_.EnableWakeWordDetection(false);
++            audio_service_.EnableVoiceProcessing(false);
++            break;
+         default:
+             // Do nothing
+             break;
+diff --git a/main/application.h b/main/application.h
+index c006c67..873f885 100644
+--- a/main/application.h
++++ b/main/application.h
+@@ -115,6 +115,17 @@ public:
+     bool RequestNotificationWake(const std::string& task_id);
+     bool RequestNotificationQuery(const uint8_t* packets, size_t size,
+                                   std::function<void(bool)> done);
++    // Online recording (main task only). EnterRecording() makes the device
++    // exclusive (no conversation, no wake word, notifications wait) without
++    // capturing yet; StartRecordingAudio() starts the encoder once the cloud
++    // accepted the session, and every encoded packet goes to `sink` instead of
++    // the conversation protocol. LeaveRecording() returns to idle.
++    bool EnterRecording(std::function<void(std::unique_ptr<AudioStreamPacket>)> sink);
++    void StartRecordingAudio();
++    void StopRecordingAudio();
++    void LeaveRecording();
++    uint32_t AudioSendQueueDropped() const { return audio_service_.SendQueueDropped(); }
++    uint32_t TakeInputPeakVariance() { return audio_service_.TakeInputPeakVariance(); }
+     bool UpgradeFirmware(const std::string& url, const std::string& version = "");
+     bool CanEnterSleepMode();
+     void SendMcpMessage(const std::string& payload);
+@@ -179,6 +190,7 @@ private:
+     int64_t query_deadline_ = 0;
+     esp_timer_handle_t query_timer_ = nullptr;
+     std::function<void(bool)> query_done_;
++    std::function<void(std::unique_ptr<AudioStreamPacket>)> recording_sink_;
+     void ContinueNotificationQuery();
+     void TickNotificationQuery();
+     void FinishNotificationQuery(bool success);
+diff --git a/main/audio/audio_service.cc b/main/audio/audio_service.cc
+index ee8b292..2cdf506 100644
+--- a/main/audio/audio_service.cc
++++ b/main/audio/audio_service.cc
+@@ -315,9 +315,14 @@ void AudioService::AudioInputTask() {
+                 if (bits & AS_EVENT_AUDIO_PROCESSOR_RUNNING) {
+                     uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+                     input_seen_ms_ = now;
+-                    if (InputQuiet::HasSoundActivity(data.data(), data.size(),
+-                                                     codec_->input_channels()))
++                    uint32_t variance = InputQuiet::SoundVariance(data.data(), data.size(),
++                                                                  codec_->input_channels());
++                    if (variance >= 240U * 240U)  // InputQuiet::HasSoundActivity
+                         input_sound_ms_ = now;
++                    // Peak since the UI last read it (recording level meter).
++                    uint32_t peak = input_peak_variance_.load();
++                    while (variance > peak && !input_peak_variance_.compare_exchange_weak(peak, variance)) {
++                    }
+                 }
+                 audio_engine_->Feed(std::move(data));
+                 continue;
+@@ -504,6 +509,7 @@ void AudioService::OpusCodecTask() {
+                              * audio is useless to the server, so drop the oldest packet. */
+                             if (audio_send_queue_.size() >= MAX_SEND_PACKETS_IN_QUEUE) {
+                                 audio_send_queue_.pop_front();
++                                send_queue_dropped_++;
+                             }
+                             audio_send_queue_.push_back(std::move(packet));
+                         }
+diff --git a/main/audio/audio_service.h b/main/audio/audio_service.h
+index 8f12e1c..a3b5390 100644
+--- a/main/audio/audio_service.h
++++ b/main/audio/audio_service.h
+@@ -123,6 +123,10 @@ public:
+     std::unique_ptr<AudioStreamPacket> PopWakeWordPacket();
+     const std::string& GetLastWakeWord() const;
+     bool CanYieldQuietListening(bool waiting_for_reply, bool manual);
++    // Encoded packets dropped because the send queue was full (oldest first).
++    uint32_t SendQueueDropped() const { return send_queue_dropped_.load(); }
++    // Peak input variance (PCM^2, DC removed) since the previous call; 0 when not capturing.
++    uint32_t TakeInputPeakVariance() { return input_peak_variance_.exchange(0); }
+     bool IsVoiceDetected() const { return voice_detected_; }
+     bool IsIdle();
+     bool IsPlaybackIdle();
+@@ -201,6 +205,8 @@ private:
+     bool audio_engine_initialized_ = false;
+     bool voice_detected_ = false;
+     std::atomic<uint32_t> input_observation_started_ms_{0}, input_seen_ms_{0}, input_sound_ms_{0};
++    std::atomic<uint32_t> send_queue_dropped_{0};
++    std::atomic<uint32_t> input_peak_variance_{0};
+ #if CONFIG_USE_DEVICE_AEC
+     bool device_aec_enabled_ = true;
+ #else
+diff --git a/main/boards/folotoy/ai-passport/ai_passport_board.cc b/main/boards/folotoy/ai-passport/ai_passport_board.cc
+index 0b50045..a98d65b 100644
+--- a/main/boards/folotoy/ai-passport/ai_passport_board.cc
++++ b/main/boards/folotoy/ai-passport/ai_passport_board.cc
+@@ -3,6 +3,24 @@
+ #include "button.h"
+ #include "codecs/es8311_audio_codec.h"
+ #include "codex_notify.h"
++#if __has_include("codex_notify_private.h")
++// The recording device ID is the notification account (one ACL per device).
++static PassportRecorder* RecorderInstance() {
++    static PassportRecorder recorder(CODEX_NOTIFY_USERNAME);
++    return &recorder;
++}
++#include "recording_overlay.h"
++// Main task. The overlay is created outside the recorder's mutex (lock order).
++static void ToggleRecording(Display* display) {
++    static RecordingOverlay overlay(RecorderInstance());
++    {
++        DisplayLockGuard lock(display);
++        overlay.Create(display);
++    }
++    RecorderInstance()->Toggle();
++}
++#define AI_PASSPORT_RECORDING 1
++#endif
+ #include "config.h"
+ #include "cw2017_battery_monitor.h"
+ #include "display/lcd_display.h"
+@@ -137,7 +155,19 @@ private:
+ 
+         auto ok = adc_button_[kAdcButtonOk];
+         ok->OnClick([this]() {
+-            Application::GetInstance().Schedule([this]() { ToggleChat(); });
++            Application::GetInstance().Schedule([this]() {
++                // A click must not start a conversation in the middle of a recording.
++                if (Application::GetInstance().GetDeviceState() != kDeviceStateRecording) ToggleChat();
++            });
++        });
++        ok->OnLongPress([]() {
++#if AI_PASSPORT_RECORDING
++            Application::GetInstance().Schedule([]() { ToggleRecording(Board::GetInstance().GetDisplay()); });
++#else
++            Application::GetInstance().Schedule([]() {
++                Board::GetInstance().GetDisplay()->ShowNotification("未配置录音服务");
++            });
++#endif
+         });
+     }
+ 
+@@ -234,6 +264,9 @@ public:
+     void StartNetwork() override {
+         WifiBoard::StartNetwork();
+         static CodexNotify codex_notify;
++#if AI_PASSPORT_RECORDING
++        codex_notify.SetRecorder(RecorderInstance());
++#endif
+         codex_notify.Start();
+     }
+ 
+diff --git a/main/boards/folotoy/ai-passport/codex_notify.h b/main/boards/folotoy/ai-passport/codex_notify.h
+index b3ac32a..fb910cc 100644
+--- a/main/boards/folotoy/ai-passport/codex_notify.h
++++ b/main/boards/folotoy/ai-passport/codex_notify.h
+@@ -11,6 +11,7 @@
+ #include "application.h"
+ #include "codex_notify_private.h"
+ #include "codex_query_audio.h"
++#include "passport_recorder.h"
+ #include "settings.h"
+ #include "wall_clock.h"
+ 
+@@ -24,6 +25,7 @@ class CodexNotify {
+     bool query_served_ = false;
+     int64_t expires_at_ = 0;
+     std::atomic<bool> tick_queued_{false};
++    PassportRecorder* recorder_ = nullptr;
+     static bool Digits(const std::string& s, size_t start) {
+         return s.find_first_not_of("0123456789", start) == std::string::npos;
+     }
+@@ -158,10 +160,19 @@ class CodexNotify {
+                 if (event_id == MQTT_EVENT_CONNECTED) {
+                     ESP_LOGI("CodexNotify", "notification channel connected");
+                     esp_mqtt_client_subscribe(self->client_, CODEX_NOTIFY_SUB_TOPIC, 1);
++                    if (self->recorder_) self->recorder_->OnConnected(self->client_);
+                 } else if (event_id == MQTT_EVENT_DATA) {
+-                    self->Receive(static_cast<esp_mqtt_event_handle_t>(data));
++                    auto e = static_cast<esp_mqtt_event_handle_t>(data);
++                    // Recording ACKs share the connection; route them by topic.
++                    if (self->recorder_ && e->current_data_offset == 0 && e->data_len == e->total_data_len &&
++                        std::string(e->topic, e->topic_len) == self->recorder_->ack_topic()) {
++                        self->recorder_->OnAckMessage(e->data, e->data_len);
++                    } else {
++                        self->Receive(e);
++                    }
+                 } else if (event_id == MQTT_EVENT_DISCONNECTED) {
+                     ESP_LOGW("CodexNotify", "notification channel disconnected; reconnecting");
++                    if (self->recorder_) self->recorder_->OnDisconnected();
+                 }
+             },
+             this);
+@@ -179,6 +190,7 @@ class CodexNotify {
+     }
+ 
+ public:
++    void SetRecorder(PassportRecorder* recorder) { recorder_ = recorder; }
+     void Start() {
+         // StartNetwork invokes this after Application initialization.
+         xTaskCreate(
+@@ -192,8 +204,10 @@ public:
+ };
+ 
+ #else
++class PassportRecorder;
+ class CodexNotify {
+ public:
++    void SetRecorder(PassportRecorder*) {}
+     void Start() {
+         ESP_LOGW("CodexNotify",
+                  "Notification credentials not configured; voice and UI remain available");
+diff --git a/main/device_state.h b/main/device_state.h
+index a769e91..955ebfd 100644
+--- a/main/device_state.h
++++ b/main/device_state.h
+@@ -13,6 +13,7 @@ enum DeviceState {
+     kDeviceStateUpgrading,
+     kDeviceStateActivating,
+     kDeviceStateAudioTesting,
++    kDeviceStateRecording,
+     kDeviceStateFatalError
+ };
+ 
+diff --git a/main/device_state_machine.cc b/main/device_state_machine.cc
+index d81ed19..efe09d9 100644
+--- a/main/device_state_machine.cc
++++ b/main/device_state_machine.cc
+@@ -18,6 +18,7 @@ static const char* const STATE_STRINGS[] = {
+     "upgrading",
+     "activating",
+     "audio_testing",
++    "recording",
+     "fatal_error",
+     "invalid_state"
+ };
+@@ -77,7 +78,8 @@ bool DeviceStateMachine::IsValidTransition(DeviceState from, DeviceState to) con
+                    to == kDeviceStateNotifying ||
+                    to == kDeviceStateActivating ||
+                    to == kDeviceStateUpgrading ||
+-                   to == kDeviceStateWifiConfiguring;
++                   to == kDeviceStateWifiConfiguring ||
++                   to == kDeviceStateRecording;
+ 
+         case kDeviceStateConnecting:
+             // Can go to idle (failed) or listening (success)
+@@ -97,6 +99,10 @@ bool DeviceStateMachine::IsValidTransition(DeviceState from, DeviceState to) con
+         case kDeviceStateNotifying:
+             return to == kDeviceStateIdle;
+ 
++        case kDeviceStateRecording:
++            // Online recording is exclusive with conversations; it only ends in idle.
++            return to == kDeviceStateIdle;
++
+         case kDeviceStateFatalError:
+             // Cannot transition out of fatal error
+             return false;
+diff --git a/main/display/muse_style/muse_style_display.cc b/main/display/muse_style/muse_style_display.cc
+index fd74032..271560d 100644
+--- a/main/display/muse_style/muse_style_display.cc
++++ b/main/display/muse_style/muse_style_display.cc
+@@ -22,9 +22,26 @@
+ 
+ namespace {
+ 
+-constexpr int kFrameMs = 40;
+-constexpr int kSleepFrameMs = 200;
+-constexpr int kStripRows = 16;
++constexpr int kFrameMs = 40;        // listening, thinking, boot: 25 fps
++constexpr int kCalmFrameMs = 80;    // idle, speaking, error: 12.5 fps
++constexpr int kSleepFrameMs = 200;  // asleep, or covered by another view
++
++// The C3 has one core: at 25 fps the avatar took 40-47 % of it when idle and
++// left speaking with ~4 % idle time next to the Opus decoder (2026-10-13 profile).
++// Animations follow wall-clock time, so a lower rate only samples them less often.
++int FramePeriodMs(robot_mode_t mode) {
++    switch (mode) {
++        case ROBOT_MODE_LISTENING:
++        case ROBOT_MODE_THINKING:
++        case ROBOT_MODE_BOOT:
++            return kFrameMs;
++        case ROBOT_MODE_OFF:
++            return kSleepFrameMs;
++        default:
++            return kCalmFrameMs;
++    }
++}
++constexpr int kStripRows = 8;  // 192 px wide: 3 KB per strip
+ constexpr int kMaxDirtyRects = 8;
+ constexpr int64_t kHappyUs = 2500 * 1000;
+ constexpr int64_t kErrorUs = 4000 * 1000;
+@@ -219,6 +236,13 @@ void MuseStyleDisplay::Tick() {
+     if (avatar_ == nullptr || strip_ == nullptr) {
+         return;
+     }
++    // Covered by another view (e.g. the recording overlay hides the screen's
++    // children): no one sees the avatar, so don't render it.
++    if (lv_obj_has_flag(avatar_, LV_OBJ_FLAG_HIDDEN)) {
++        lv_timer_set_period(timer_, kSleepFrameMs);
++        mode_ = -1;  // repaint fully and restore the rate when shown again
++        return;
++    }
+     int64_t now = esp_timer_get_time();
+     robot_mode_t mode = ModeOf(Application::GetInstance().GetDeviceState());
+     if (sleepy_) {
+@@ -234,7 +258,7 @@ void MuseStyleDisplay::Tick() {
+         uint32_t accent = robot_pixel_accent(mode);
+         lv_obj_set_style_text_color(status_label_, lv_color_hex(accent), 0);
+         lv_obj_set_style_text_color(notification_label_, lv_color_hex(accent), 0);
+-        lv_timer_set_period(timer_, mode == ROBOT_MODE_OFF ? kSleepFrameMs : kFrameMs);
++        lv_timer_set_period(timer_, FramePeriodMs(mode));
+         last_grid_valid_ = false;  // the palette changes with the mode
+     }
+ 
+@@ -245,20 +269,7 @@ void MuseStyleDisplay::Tick() {
+         .level = 0,
+         .happy = now < happy_until_us_ ? 1.0f : 0.0f,
+     };
+-    int64_t render_start = esp_timer_get_time();
+     robot_pixel_render(&pose);
+-    int64_t render_us = esp_timer_get_time() - render_start;
+-    render_max_us_ = std::max(render_max_us_, render_us);
+-    render_sum_us_ += render_us;
+-    render_frames_++;
+-    if (now - render_log_us_ > 10 * 1000 * 1000) {
+-        ESP_LOGI(TAG, "avatar render avg %d us, max %d us, %d frames",
+-                 (int)(render_sum_us_ / render_frames_), (int)render_max_us_, render_frames_);
+-        render_log_us_ = now;
+-        render_max_us_ = 0;
+-        render_sum_us_ = 0;
+-        render_frames_ = 0;
+-    }
+     InvalidateChangedCells();
+ }
+ 
+diff --git a/main/display/muse_style/muse_style_display.h b/main/display/muse_style/muse_style_display.h
+index e077234..c5b9338 100644
+--- a/main/display/muse_style/muse_style_display.h
++++ b/main/display/muse_style/muse_style_display.h
+@@ -36,10 +36,6 @@ private:
+     int64_t happy_until_us_ = 0;
+     int64_t error_until_us_ = 0;
+     bool sleepy_ = false;
+-    int64_t render_max_us_ = 0;
+-    int64_t render_log_us_ = 0;
+-    int64_t render_sum_us_ = 0;
+-    int render_frames_ = 0;
+ 
+     void ApplyStyle();
+     void CreateAvatar();
+diff --git a/main/display/muse_style/robot_pixel.c b/main/display/muse_style/robot_pixel.c
+index 46de417..bdb1cb7 100644
+--- a/main/display/muse_style/robot_pixel.c
++++ b/main/display/muse_style/robot_pixel.c
+@@ -713,7 +713,9 @@ void robot_pixel_render(const robot_pose_t* p)
+     draw_character(&f, t, antenna_lit);
+     s_ox = s_oy = 0;
+     outline_pass();
+-    draw_halo(halo, t);
++    /* Idle: a still halo. The moving ripple flips cells all over the ring, so
++     * nearly the whole avatar was redrawn every frame (2026-10-13 profile). */
++    draw_halo(halo, p->mode == ROBOT_MODE_IDLE ? 0.0f : t);
+ 
+     /* sparkles orbit around her: behind first, then in front */
+     if (p->mode != ROBOT_MODE_OFF && p->mode != ROBOT_MODE_ERROR) {
