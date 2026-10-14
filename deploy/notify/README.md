@@ -32,7 +32,7 @@ NGINX_NOTIFY_SITE=/etc/nginx/sites-available/pocket-judo bash install.sh
 
 ## 本机运行与检查
 
-Gateway 在配置存在且非 Mock 时自动启动 relay；退出后5秒重启，Gateway 关闭时一并停止。已验证自动重启。PID 在 `data/notify-relay.pid`，日志继承 Gateway（当前 `/private/tmp/xiaocdoex-gateway.log`）。本机尚未配置开机自启动。
+Gateway 在配置存在且非 Mock 时自动启动 relay；退出后5秒重启，Gateway 关闭时一并停止。已验证自动重启。PID 在 `data/notify-relay.pid`，日志继承 Gateway 的标准错误输出。本机尚未配置开机自启动。
 
 `npm run notify:probe` 只验证软件云通道，不代表设备播报。`npm run notify:device -- --replay` 以已有终态任务重放通知，验证设备查询与音频排空回执，不启动新 Codex 任务。需要连接真实设备并保持 Gateway、pipe 在线。不要额外运行第二个生产 relay。
 

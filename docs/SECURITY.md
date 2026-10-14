@@ -47,3 +47,10 @@ Codex 的临时目录排除项与附加可写根目录定义见 [官方配置参
 云端 MQTT 仅传固定结构的事件 ID、任务 ID、类型和到期时间；设备与 Gateway 使用不同凭据和互反主题 ACL。设备凭据不包含本机 Bearer 或 Codex 凭据。专用工具 `codex_get_notifications` 的身份仍由本机 namespace 配置决定，无路径、设备 ID 或自由指令参数；只写通知查询回执，不修改任务状态或执行新任务。结果文本仅通过既有官方 MCP/语音链路返回。
 
 查询音频为固件内固定内容，通知会话关闭麦克风；安静检测只在现有输入流计算幅度，不保存或新增上传环境录音。只有当前查询回执和固件音频排空确认共同成立才清队列，软件 probe 不能冒充固件成功。凭据文件、Flash 备份和构建私有头均忽略提交。
+
+## 录音通道与管理网页
+
+- 设备只用自己的 MQTT 账号向 `devices/<id>/recording/{request,audio}` 发布、读取 `…/ack`；设备 ID 只取自主题，ACL 把账号绑定到主题。`bridge-gateway` 没有录音权限。
+- 录音存服务器 `/var/lib/recording-ingest`（0700，独立系统用户），服务只写该目录（systemd `ProtectSystem=strict`）。转写时百炼通过 30 分钟有效、用完即撤销的随机链接取音频。
+- 录音 API 需 64 位 Bearer 令牌（Mac Bridge 用）；管理网页用单独密码换取 30 天 HttpOnly、Secure、SameSite=Strict 会话 Cookie，服务器只存 scrypt 哈希，1 分钟内失败 5 次即锁 1 分钟。网页带严格 CSP，所有数据以文本节点渲染。删除不可恢复，转写中的录音拒绝删除。
+- 录音正文对 Codex 只是资料，不作为用户授权；`recording_to_codex` 仍经过原有指令检查。

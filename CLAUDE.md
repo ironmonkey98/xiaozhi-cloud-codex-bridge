@@ -9,4 +9,6 @@
 - Gateway 只绑定回环地址并要求 Bearer；不得把接入点 token、`LOCAL_BRIDGE_TOKEN`、Codex 凭据写入仓库或日志。
 - 源码为可直接被 Node 类型剥离运行的 TypeScript（`erasableSyntaxOnly`，相对导入带 `.ts` 后缀）。
 - 每次改动后运行并如实报告：`npm run typecheck`、`npm test`、`npm run test:mcp`；涉及桥接器时加 `npm run test:pipe`；涉及 Codex 调用时加 `npm run test:e2e`（消耗额度，先征得同意）。
+- 录音子系统：服务端 `src/recording/`（MQTT 收录音、Ogg/Opus 封装、百炼转写、8443 API 与管理网页 `src/recording/ui/`），部署见 `deploy/recording/`；MCP 工具在 `src/gateway/recording-*.ts`；协议 `docs/RECORDING_PROTOCOL.md`，API `docs/RECORDING_API.md`。录音进行中不得重启 `recording-ingest`。
+- 仓库公开：不得提交服务器地址、本机路径、任何凭据或含凭据的固件；文档用 `<server>`、`notify.example.com` 等占位符。凭据只放 `.env`、`config/*.local.json` 与服务器 `/etc/recording-ingest/recording.json`。
 - 未在真实小智设备上验证的项目，在 `IMPLEMENTATION_REPORT.md` 中只能标记 BLOCKED / NOT_RUN。

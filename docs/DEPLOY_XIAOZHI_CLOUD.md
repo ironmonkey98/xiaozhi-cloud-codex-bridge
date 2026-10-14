@@ -48,7 +48,7 @@ npm run start:daemon     # 终端 1
 npm run pipe             # 终端 2：生成 external/mcp_config.json 并连接接入点
 ```
 
-`npm run pipe` 输出中的 `token=` 会被替换为 `<redacted>`。控制台刷新后应看到 7 个 `codex_*` 工具。然后：
+`npm run pipe` 输出中的 `token=` 会被替换为 `<redacted>`。控制台刷新后应看到 11 个工具：8 个 `codex_*` 与 3 个 `recording_*`（录音工具在未配置录音 API 时返回 `RECORDING_NOT_CONFIGURED`）。然后：
 
 | 语音 | 期望工具 |
 |---|---|

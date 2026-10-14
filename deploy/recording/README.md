@@ -20,7 +20,7 @@
 
 - `/etc/mosquitto/passwd-xiaozhi-notify`：新增用户 `recording-ingest`（随机密码，仅存于上面的 json）。
 - `/etc/mosquitto/acl-xiaozhi-notify`：追加 `acl.append`。原通知规则、`bridge-gateway` 与 `passport-01` 原有权限不变；`bridge-gateway` 无录音权限。
-- 设备仍走现有 nginx WSS 路径到 18884，无需改 nginx。
+- 设备仍走现有 nginx WSS 路径到 18884，录音上传不需要改 443 站点。录音 API、管理网页与百炼下载链接使用单独的 8443 站点（[nginx-recording.conf](nginx-recording.conf)），只放行 GET、DELETE、POST。
 - 改动前备份：`/root/backup-recording-<时间>/`。
 
 ## 配置示例（`recording.json`）
