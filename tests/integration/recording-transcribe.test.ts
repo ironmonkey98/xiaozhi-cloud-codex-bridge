@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
@@ -135,6 +135,58 @@ describe('recording API', async () => {
     assert.equal((body.recordings[0]!.transcript as { state: string }).state, 'pending');
     assert.equal((body.recordings[2]!.transcript as { state: string }).state, 'none');
     assert.equal((await get('/recording-api/v1/recordings?limit=0')).status, 400);
+    assert.equal((await get('/recording-api/v1/recordings?limit=200')).status, 200);
+    assert.equal((await get('/recording-api/v1/recordings?limit=201')).status, 400);
+  });
+
+  it('searches finished transcripts and returns a snippet around the hit', async () => {
+    const hit = await (await get(`/recording-api/v1/recordings?q=${encodeURIComponent('上线')}`)).json() as
+      { recordings: { recording_id: string; match: string }[] };
+    assert.deepEqual(hit.recordings.map((r) => [r.recording_id, r.match]), [['1'.repeat(32), '会议要点：上线录音。']]);
+    const none = await (await get('/recording-api/v1/recordings?q=nothing')).json() as { recordings: unknown[] };
+    assert.equal(none.recordings.length, 0);
+    assert.equal((await get(`/recording-api/v1/recordings?q=${'x'.repeat(101)}`)).status, 400);
+  });
+
+  it('serves audio to token holders only', async () => {
+    assert.equal((await get(`/recording-api/v1/recordings/${'1'.repeat(32)}/audio`, null)).status, 401);
+    const res = await get(`/recording-api/v1/recordings/${'1'.repeat(32)}/audio`);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('content-type'), 'audio/ogg');
+    assert.equal(Buffer.from(await res.arrayBuffer()).toString(), 'OggS fake audio');
+    assert.equal((await get(`/recording-api/v1/recordings/${'4'.repeat(32)}/audio`)).status, 404, 'failed: no audio');
+  });
+
+  it('serves the management page without data and with a strict CSP', async () => {
+    const res = await fetch(`${base}/recording-api/ui/`);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get('content-security-policy') ?? '', /script-src 'self'/);
+    assert.match(await res.text(), /<title>录音管理<\/title>/);
+    assert.equal((await fetch(`${base}/recording-api/ui/app.js`)).status, 200);
+    assert.equal((await fetch(`${base}/recording-api/ui/../v1/recordings`)).status, 401);
+    assert.equal((await fetch(`${base}/recording-api/ui`, { redirect: 'manual' })).status, 301);
+  });
+
+  it('deletes a finished recording, but not while it is transcribing', async () => {
+    const del = (id: string, token: string | null = TOKEN) =>
+      fetch(`${base}/recording-api/v1/recordings/${id}`, { method: 'DELETE',
+        headers: token ? { Authorization: `Bearer ${token}` } : {} });
+    const id = '5'.repeat(32);
+    makeSession(dataDir, id, 'saved', '2026-10-13T08:00:00.000Z');
+    const dir = join(dataDir, 'sessions', id);
+    writeFileSync(join(dir, 'transcript-state.json'), JSON.stringify({ state: 'running', attempts: 1 }));
+    assert.equal((await del(id, null)).status, 401);
+    assert.equal((await del(id)).status, 409);
+    writeFileSync(join(dir, 'transcript-state.json'), JSON.stringify({ state: 'failed', attempts: 3, error: 'x' }));
+    assert.deepEqual(await (await del(id)).json(), { deleted: id });
+    assert.equal(existsSync(dir), false);
+    assert.equal(existsSync(join(dataDir, 'recordings', `${id}.ogg`)), false);
+    assert.equal((await del(id)).status, 404);
+    assert.equal((await del('3'.repeat(32))).status, 404, 'a session still receiving is not a recording');
+    assert.equal((await fetch(`${base}/recording-api/v1/recordings`, { method: 'DELETE',
+      headers: { Authorization: `Bearer ${TOKEN}` } })).status, 405);
+    assert.equal((await fetch(`${base}/recording-api/v1/recordings/${'1'.repeat(32)}`, { method: 'POST',
+      headers: { Authorization: `Bearer ${TOKEN}` } })).status, 405);
   });
 
   it('returns transcripts, 409 while not ready, 404/400 for unknown or malformed IDs', async () => {

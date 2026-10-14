@@ -1,7 +1,7 @@
-// Loopback HTTP server behind nginx (port 8443): Bailian's audio download links and the
-// read-only recording API for the Mac bridge. Contract: docs/RECORDING_API.md.
+// Loopback HTTP server behind nginx (port 8443): Bailian's audio download links, the
+// recording API for the Mac bridge and the management page. Contract: docs/RECORDING_API.md.
 import { timingSafeEqual } from 'node:crypto';
-import { createReadStream, readdirSync, readFileSync, statSync } from 'node:fs';
+import { createReadStream, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { join } from 'node:path';
 import type { SessionMeta } from './session.ts';
@@ -15,6 +15,15 @@ export interface ApiOptions {
 }
 
 const ID = /^[a-f0-9]{32}$/;
+const UI_DIR = join(import.meta.dirname, 'ui');
+const UI_FILES: Record<string, { file: string; type: string }> = {
+  '/recording-api/ui/': { file: 'index.html', type: 'text/html; charset=utf-8' },
+  '/recording-api/ui/app.js': { file: 'app.js', type: 'text/javascript; charset=utf-8' },
+  '/recording-api/ui/app.css': { file: 'app.css', type: 'text/css; charset=utf-8' },
+};
+// The page holds no data; everything it shows comes from the token-protected API.
+const UI_CSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; media-src blob:; " +
+  "img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 function send(res: ServerResponse, status: number, body: unknown): void {
   const data = JSON.stringify(body);
@@ -76,9 +85,25 @@ export function startApi(port: number, o: ApiOptions): Server {
   });
 
   function handle(req: IncomingMessage, res: ServerResponse): void {
-    if (req.method !== 'GET') return send(res, 405, { error: 'method_not_allowed' });
     const url = new URL(req.url ?? '/', 'http://localhost');
     const path = url.pathname;
+    if (req.method !== 'GET' && !(req.method === 'DELETE' && path.startsWith('/recording-api/v1/recordings/'))) {
+      return send(res, 405, { error: 'method_not_allowed' });
+    }
+
+    if (path === '/recording-api/ui') {
+      res.writeHead(301, { Location: '/recording-api/ui/' });
+      res.end();
+      return;
+    }
+    const ui = UI_FILES[path];
+    if (ui) {
+      const data = readFileSync(join(UI_DIR, ui.file));
+      res.writeHead(200, { 'Content-Type': ui.type, 'Content-Length': data.length, 'Cache-Control': 'no-cache',
+        'Content-Security-Policy': UI_CSP, 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer' });
+      res.end(data);
+      return;
+    }
 
     // Bailian download link: unguessable, short-lived, no other auth.
     const dl = /^\/recording-dl\/([a-f0-9]{48})$/.exec(path);
@@ -96,30 +121,64 @@ export function startApi(port: number, o: ApiOptions): Server {
       return;
     }
 
-    const api = /^\/recording-api\/v1\/recordings(?:\/([^/]+)(\/transcript)?)?$/.exec(path);
+    const api = /^\/recording-api\/v1\/recordings(?:\/([^/]+)(\/transcript|\/audio)?)?$/.exec(path);
     if (!api) return send(res, 404, { error: 'not_found' });
     if (!authorized(req, o.token)) return send(res, 401, { error: 'unauthorized' });
-    const [, id, transcriptPart] = api;
+    const [, id, part] = api;
 
     if (!id) {
       const limitRaw = url.searchParams.get('limit') ?? '10';
       const limit = Number(limitRaw);
-      if (!/^\d+$/.test(limitRaw) || limit < 1 || limit > 50) return send(res, 400, { error: 'bad_request' });
+      if (!/^\d+$/.test(limitRaw) || limit < 1 || limit > 200) return send(res, 400, { error: 'bad_request' });
+      const q = (url.searchParams.get('q') ?? '').trim().toLowerCase();
+      if (q.length > 100) return send(res, 400, { error: 'bad_request' });
       let ids: string[] = [];
       try {
         ids = readdirSync(join(o.dataDir, 'sessions')).filter((x) => ID.test(x));
       } catch { /* none yet */ }
-      const recordings = ids.map((x) => readMeta(o.dataDir, x)).filter((m): m is SessionMeta => m !== null)
+      let recordings = ids.map((x) => readMeta(o.dataDir, x)).filter((m): m is SessionMeta => m !== null)
         .map((m) => recordingOf(o.dataDir, m)).filter((r) => r !== null)
-        .sort((a, b) => b.created_at.localeCompare(a.created_at)).slice(0, limit);
-      return send(res, 200, { recordings });
+        .sort((a, b) => b.created_at.localeCompare(a.created_at));
+      if (q) {
+        // Search only reads transcripts that are done; the result adds a short snippet around the first hit.
+        recordings = recordings.flatMap((r) => {
+          const text = r.transcript.state === 'done' ? readTranscript(o.dataDir, r.recording_id)?.text ?? '' : '';
+          const at = text.toLowerCase().indexOf(q);
+          if (at < 0) return [];
+          const from = Math.max(0, at - 30);
+          return [{ ...r, match: (from > 0 ? '…' : '') + text.slice(from, at + q.length + 50) }];
+        });
+      }
+      return send(res, 200, { recordings: recordings.slice(0, limit) });
     }
 
     if (!ID.test(id)) return send(res, 400, { error: 'bad_request' });
     const meta = readMeta(o.dataDir, id);
     const recording = meta ? recordingOf(o.dataDir, meta) : null;
     if (!recording) return send(res, 404, { error: 'not_found' });
-    if (!transcriptPart) return send(res, 200, recording);
+
+    if (req.method === 'DELETE') {
+      if (part) return send(res, 405, { error: 'method_not_allowed' });
+      // The transcriber sets "running" in the same tick it picks a recording, so this check cannot race it.
+      if (recording.transcript.state === 'running') return send(res, 409, { error: 'transcript_running' });
+      rmSync(join(o.dataDir, 'sessions', id), { recursive: true, force: true });
+      rmSync(join(o.dataDir, 'recordings', `${id}.ogg`), { force: true });
+      o.log?.({ event: 'recording_deleted', recording_id: id });
+      return send(res, 200, { deleted: id });
+    }
+    if (!part) return send(res, 200, recording);
+
+    if (part === '/audio') {
+      const file = join(o.dataDir, 'recordings', `${id}.ogg`);
+      let size = 0;
+      try {
+        size = statSync(file).size;
+      } catch { /* failed recordings have no audio */ }
+      if (size === 0) return send(res, 404, { error: 'not_found' });
+      res.writeHead(200, { 'Content-Type': 'audio/ogg', 'Content-Length': size, 'Cache-Control': 'no-store' });
+      createReadStream(file).pipe(res);
+      return;
+    }
 
     if (recording.transcript.state === 'failed') return send(res, 409, { error: 'transcript_failed', state: 'failed' });
     const transcript = recording.transcript.state === 'done' ? readTranscript(o.dataDir, id) : null;

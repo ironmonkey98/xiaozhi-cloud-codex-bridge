@@ -6,7 +6,7 @@
 
 - 基址：`https://<server>:8443/recording-api/v1`（独立 nginx 站点，8443 → 回环端口；不改动 443 上的其他站点）。
 - 鉴权：`Authorization: Bearer <RECORDING_API_TOKEN>`。令牌 64 位 hex，Mac 端放 `.env`，服务端放 `/etc/recording-ingest/recording.json`；不得写入仓库或日志。
-- 只读；不接受设备标识或路径参数。`recording_id` 为 32 位小写 hex。
+- 除删除外均为只读；不接受设备标识或路径参数。`recording_id` 为 32 位小写 hex。
 - 响应均为 JSON（UTF-8）。错误：`401 {"error":"unauthorized"}`，`404 {"error":"not_found"}`，`400 {"error":"bad_request"}`。
 
 ## 对象
@@ -29,9 +29,11 @@
 
 ## 接口
 
-### `GET /recordings?limit=10`
+### `GET /recordings?limit=10&q=关键词`
 
-按 `created_at` 倒序，`limit` 1–50（默认 10）。不含仍在接收中的会话。
+按 `created_at` 倒序，`limit` 1–200（默认 10）。不含仍在接收中的会话。
+
+`q`（可选，≤100 字）只在已完成的转写全文中查找（不区分大小写）；结果每条多一个 `match` 字段：命中位置附近的一小段文字。
 
 ```json
 {"recordings": [Recording, ...]}
@@ -54,6 +56,18 @@
 ```
 
 转写未完成时 `409 {"error":"transcript_not_ready","state":"pending"}`；失败时 `409 {"error":"transcript_failed","state":"failed"}`。
+
+### `GET /recordings/{recording_id}/audio`
+
+`audio/ogg` 音频；`failed` 录音没有音频，返回 404。
+
+### `DELETE /recordings/{recording_id}`
+
+删除音频、帧日志与转写，不能恢复。成功 `200 {"deleted":"<id>"}`；正在转写时 `409 {"error":"transcript_running"}`；接收中或不存在 404。
+
+## 管理页面
+
+`https://<server>:8443/recording-api/ui/`：列表、播放、查看转写（点句子跳到对应位置）、复制全文、下载、搜索、删除。页面本身不含数据，也不需要鉴权；首次打开输入上面的访问令牌，令牌只存在该浏览器的 localStorage，点“退出”清除。页面带严格 CSP，只连同源 API。
 
 ## 转写规则（服务端）
 
