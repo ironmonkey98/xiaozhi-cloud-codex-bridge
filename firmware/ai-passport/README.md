@@ -26,7 +26,7 @@ ESP-IDF v6.1 构建、100项 host 测试、UI 保留检查通过。真实设备�
 
 ## 在线录音与性能优化（2026-10-13 实机验证）
 
-在上面的通知改造之上应用 `recording.patch`，并复制 `recorder_core.h`、`passport_recorder.h`、`recording_overlay.h` 到 `main/boards/folotoy/ai-passport/`。完整提交历史在固件仓库 `xiaozhi-esp32` 的 `passport-recording` 分支（基于上游 `ed5cd7b`）。
+在上面的通知改造之上应用 `recording.patch`，并复制 `recorder_core.h`、`passport_recorder.h`、`recording_overlay.h` 到 `main/boards/folotoy/ai-passport/`。完整提交历史在固件仓库 [ai-passport-firmware](https://github.com/ironmonkey98/ai-passport-firmware) 的 `main` 分支（基于上游 `ed5cd7b`）。
 
 - 操作：OK **长按** 开始/停止；录音中单击 OK 不会开启对话。全屏录音界面（LVGL 顶层）显示 REC 闪烁点、像素计时、实时音量条、**云端已落盘时长**与状态灯（绿=已确认、黄=积压、红=断网）；结束显示“已保存 / 部分保存 / 录音失败”。只有云端 `finish_ack: saved` 才显示“已保存”。
 - 互斥：录音期间设备处于 `recording` 状态，唤醒词关闭、不开对话；通知查询要求 idle，因此自动排队。
