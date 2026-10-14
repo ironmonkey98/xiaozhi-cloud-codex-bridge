@@ -16,9 +16,9 @@
   </header>
 
   <form id="login" hidden>
-    <p>输入录音 API 访问令牌（64 位）。令牌只保存在本浏览器。</p>
-    <input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="访问令牌" required>
-    <button type="submit">进入</button>
+    <p>输入管理密码。登录后 30 天内本浏览器无需再输入。</p>
+    <input id="password" type="password" autocomplete="current-password" spellcheck="false" placeholder="密码" required>
+    <button type="submit" id="login-btn">登录</button>
     <p id="login-error" class="error" hidden></p>
   </form>
 

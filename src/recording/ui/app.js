@@ -1,21 +1,19 @@
-// Recording management page. Talks only to the token-protected API next to it.
+// Recording management page. Talks only to the login-protected API next to it.
 // All data goes into the page through textContent; never through innerHTML.
 'use strict';
 
+// Login is a password exchanged for an HttpOnly session cookie; this script never sees a credential.
 const API = '../v1/recordings';
-const KEY = 'recording-api-token';
 const $ = (id) => document.getElementById(id);
 
-let token = '';
-try { token = localStorage.getItem(KEY) || ''; } catch { /* storage blocked */ }
 let current = null;      // recording shown in the dialog
 let audioUrl = '';       // object URL of the loaded audio
 let transcriptText = '';
 
 async function api(path, init = {}) {
-  const res = await fetch(API + path, { ...init, headers: { Authorization: `Bearer ${token}` }, cache: 'no-store' });
+  const res = await fetch(API + path, { ...init, credentials: 'same-origin', cache: 'no-store' });
   if (res.status === 401) {
-    logout('令牌无效，请重新输入。');
+    showLogin('');
     throw new Error('unauthorized');
   }
   return res;
@@ -198,15 +196,14 @@ $('d-delete').addEventListener('click', async () => {
 $('d-close').addEventListener('click', () => $('detail').close());
 $('detail').addEventListener('close', () => { current = null; resetDetail(); });
 
-function logout(message = '') {
-  token = '';
-  try { localStorage.removeItem(KEY); } catch { /* storage blocked */ }
+function showLogin(message) {
   $('app').hidden = true;
   $('logout').hidden = true;
   $('login').hidden = false;
   $('login-error').hidden = !message;
   $('login-error').textContent = message;
   if ($('detail').open) $('detail').close();
+  $('password').focus();
 }
 
 function enter() {
@@ -216,21 +213,33 @@ function enter() {
   load();
 }
 
-$('login').addEventListener('submit', (e) => {
+$('login').addEventListener('submit', async (e) => {
   e.preventDefault();
-  const value = $('token').value.trim();
-  if (!/^[a-f0-9]{64}$/i.test(value)) {
+  $('login-btn').disabled = true;
+  try {
+    const res = await fetch('login', { method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: $('password').value }) });
+    if (res.ok) {
+      $('password').value = '';
+      enter();
+      return;
+    }
     $('login-error').hidden = false;
-    $('login-error').textContent = '令牌格式不对：应为 64 位十六进制。';
-    return;
+    $('login-error').textContent = res.status === 429 ? '尝试次数过多，请 1 分钟后再试。'
+      : res.status === 401 ? '密码不对。' : `登录失败：HTTP ${res.status}`;
+  } catch (err) {
+    $('login-error').hidden = false;
+    $('login-error').textContent = `登录失败：${err.message}`;
+  } finally {
+    $('login-btn').disabled = false;
   }
-  token = value.toLowerCase();
-  try { localStorage.setItem(KEY, token); } catch { /* storage blocked: keep for this tab */ }
-  $('token').value = '';
-  enter();
 });
-$('logout').addEventListener('click', () => logout());
+$('logout').addEventListener('click', async () => {
+  try { await fetch('logout', { method: 'POST', credentials: 'same-origin' }); } catch { /* offline: cookie stays */ }
+  showLogin('已退出。');
+});
 $('search').addEventListener('submit', (e) => { e.preventDefault(); load(); });
 $('refresh').addEventListener('click', () => { $('q').value = ''; load(); });
 
-if (token) enter(); else logout();
+// The first list call shows the login form when there is no valid session.
+enter();

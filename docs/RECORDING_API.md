@@ -67,7 +67,13 @@
 
 ## 管理页面
 
-`https://<server>:8443/recording-api/ui/`：列表、播放、查看转写（点句子跳到对应位置）、复制全文、下载、搜索、删除。页面本身不含数据，也不需要鉴权；首次打开输入上面的访问令牌，令牌只存在该浏览器的 localStorage，点“退出”清除。页面带严格 CSP，只连同源 API。
+`https://<server>:8443/recording-api/ui/`：列表、播放、查看转写（点句子跳到对应位置）、复制全文、下载、搜索、删除。页面本身不含数据。登录用管理密码（与 API 令牌分开）：
+
+- `POST /recording-api/ui/login`，`Content-Type: application/json`，`{"password":"…"}`。成功后下发 `rec_session` Cookie（HttpOnly、Secure、SameSite=Strict，30 天）；会话只在服务进程内存中，服务重启后需重新登录。
+- 1 分钟内失败 5 次后返回 429，1 分钟后恢复。
+- `POST /recording-api/ui/logout` 结束会话。
+- 服务端只存 scrypt 哈希：`recording.json` 的 `api.ui_password_hash`，由 `node scripts/recording-ui-password.ts < 密码文件` 生成。未配置时登录接口返回 404。
+- 上面的接口同时接受 Bearer 令牌（Mac Bridge 用）与登录 Cookie。页面带严格 CSP，只连同源 API。
 
 ## 转写规则（服务端）
 

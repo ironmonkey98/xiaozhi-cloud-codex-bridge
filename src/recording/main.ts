@@ -27,6 +27,8 @@ export const recordingConfigSchema = z.object({
   api: z.object({
     port: z.number().int().min(1024).max(65535),
     token: z.string().regex(/^[a-f0-9]{64}$/),
+    /** Management page password hash (scripts/recording-ui-password.ts). */
+    ui_password_hash: z.string().regex(/^scrypt\$[a-f0-9]{32}\$[a-f0-9]{64}$/).optional(),
   }).strict().optional(),
   /** Bailian Fun-ASR; needs `api` for the download links. */
   transcription: z.object({
@@ -73,7 +75,8 @@ const timer = setInterval(() => ingest.tick(), 500);
 
 const tokens = new DownloadTokens();
 const apiServer = config.api
-  ? startApi(config.api.port, { dataDir: resolve(root, config.data_dir), token: config.api.token, tokens, log })
+  ? startApi(config.api.port, { dataDir: resolve(root, config.data_dir), token: config.api.token,
+    uiPasswordHash: config.api.ui_password_hash, tokens, log })
   : null;
 const transcriber = config.transcription
   ? new Transcriber({ dataDir: resolve(root, config.data_dir), apiKey: config.transcription.api_key,

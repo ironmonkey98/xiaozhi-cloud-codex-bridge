@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
-import { startApi } from '../../src/recording/api.ts';
+import { hashUiPassword, startApi } from '../../src/recording/api.ts';
 import { DownloadTokens, readTranscriptStatus, Transcriber } from '../../src/recording/transcribe.ts';
 import { freePort } from '../helpers.ts';
 
@@ -210,5 +210,55 @@ describe('recording API', async () => {
     tokens.revoke(token);
     assert.equal((await fetch(`${base}/recording-dl/${token}`)).status, 404);
     assert.equal((await fetch(`${base}/recording-dl/${'0'.repeat(48)}`)).status, 404);
+  });
+});
+
+describe('management page login', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'rec-ui-'));
+  makeSession(dataDir, '1'.repeat(32), 'saved', '2026-10-13T10:00:00.000Z');
+  let now = 1_000_000;
+  const port = await freePort();
+  const server = startApi(port, { dataDir, token: TOKEN, tokens: new DownloadTokens(),
+    uiPasswordHash: hashUiPassword('correct horse battery'), now: () => now });
+  after(() => server.close());
+  const base = `http://127.0.0.1:${port}`;
+  const login = (password: unknown, type = 'application/json') => fetch(`${base}/recording-api/ui/login`,
+    { method: 'POST', headers: { 'Content-Type': type }, body: JSON.stringify({ password }) });
+  const list = (cookie: string) => fetch(`${base}/recording-api/v1/recordings`, { headers: { Cookie: cookie } });
+
+  it('exchanges the password for an HttpOnly session cookie that opens the API', async () => {
+    const res = await login('correct horse battery');
+    assert.equal(res.status, 200);
+    const setCookie = res.headers.get('set-cookie') ?? '';
+    assert.match(setCookie, /^rec_session=[a-f0-9]{64}; Path=\/recording-api\/; Max-Age=2592000; HttpOnly; Secure; SameSite=Strict$/);
+    const cookie = setCookie.split(';')[0]!;
+    assert.equal((await list(cookie)).status, 200);
+    assert.equal((await list(`rec_session=${'0'.repeat(64)}`)).status, 401);
+    now += 30 * 24 * 3600_000;
+    assert.equal((await list(cookie)).status, 401, 'session expired');
+  });
+
+  it('ends the session on logout', async () => {
+    const cookie = (await login('correct horse battery')).headers.get('set-cookie')!.split(';')[0]!;
+    await fetch(`${base}/recording-api/ui/logout`, { method: 'POST', headers: { Cookie: cookie } });
+    assert.equal((await list(cookie)).status, 401);
+  });
+
+  it('rejects wrong passwords, non-JSON bodies and limits attempts', async () => {
+    assert.equal((await login('correct horse battery', 'text/plain')).status, 415);
+    assert.equal((await login(42)).status, 401);
+    for (let i = 0; i < 4; i++) assert.equal((await login('wrong')).status, 401);
+    assert.equal((await login('correct horse battery')).status, 429, 'locked even with the right password');
+    now += 60_000;
+    assert.equal((await login('correct horse battery')).status, 200);
+  });
+
+  it('is off without a configured password', async () => {
+    const p = await freePort();
+    const plain = startApi(p, { dataDir, token: TOKEN, tokens: new DownloadTokens() });
+    const res = await fetch(`http://127.0.0.1:${p}/recording-api/ui/login`, { method: 'POST',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: 'x' }) });
+    plain.close();
+    assert.equal(res.status, 404);
   });
 });
