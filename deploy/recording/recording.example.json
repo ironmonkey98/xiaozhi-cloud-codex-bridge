@@ -1,0 +1,18 @@
+{
+  "url": "mqtt://127.0.0.1:18883",
+  "username": "recording-ingest",
+  "password": "<openssl rand -hex 24>",
+  "devices": ["passport-01"],
+  "data_dir": "/var/lib/recording-ingest",
+  "python": "/opt/recording-ingest/cloud/recording-ingest/finalize/.venv/bin/python",
+  "finalize_script": "/opt/recording-ingest/cloud/recording-ingest/finalize/finalize.py",
+  "api": {
+    "port": 18890,
+    "token": "<openssl rand -hex 32>",
+    "ui_password_hash": "<node scripts/recording-ui-password.ts 的输出>"
+  },
+  "transcription": {
+    "api_key": "<百炼 API Key>",
+    "public_base_url": "https://notify.example.com:8443/recording-dl"
+  }
+}

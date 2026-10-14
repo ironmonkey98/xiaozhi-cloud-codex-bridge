@@ -25,6 +25,8 @@
 
 ## 配置示例（`recording.json`）
 
+完整示例（含录音 API、网页密码哈希、百炼转写）：[recording.example.json](recording.example.json)。nginx 8443 站点：[nginx-recording.conf](nginx-recording.conf)。下面是最小配置（只收录音，不转写）：
+
 ```json
 {
   "url": "mqtt://127.0.0.1:18883",

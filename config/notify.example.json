@@ -1,0 +1,7 @@
+{
+  "url": "wss://notify.example.com/codex-notify/mqtt",
+  "device_id": "passport-01",
+  "namespace": "default",
+  "gateway": { "username": "bridge-gateway", "password": "<openssl rand -hex 24>" },
+  "device": { "username": "passport-01", "password": "<openssl rand -hex 24>" }
+}

@@ -1,0 +1,6 @@
+{
+  "name": "recording-ingest",
+  "private": true,
+  "type": "module",
+  "dependencies": { "mqtt": "5.16.0", "zod": "4.6.5" }
+}
